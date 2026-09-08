@@ -80,5 +80,6 @@ jobs:
         with:
           name: DesktopApp-${{ matrix.platform }}
           path: |
-            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/dmg/*.dmg
+            src-tauri/target/release/bundle/macos/*.app
           if-no-files-found: error
