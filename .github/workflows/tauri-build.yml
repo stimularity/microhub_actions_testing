@@ -51,15 +51,9 @@ jobs:
         shell: Rscript {0}
       # --- END R SHINYLIVE EXPORT SYSTEM ---
 
-      # Tauri action requires a package.json file to map dependencies
-      - name: Initialize Frontend Config
-        run: |
-          if [ ! -f package.json ]; then
-            echo '{"name":"shiny-tauri","version":"1.0.0","private":true,"scripts":{"tauri":"tauri"}}' > package.json
-            npm install @tauri-apps/cli
-          else
-            npm install
-          fi
+      # tauri-action runs `npm run tauri build`, so the CLI must be installed
+      - name: Install Frontend Dependencies
+        run: npm ci
         shell: bash
 
       - name: Install Linux System Dependencies
