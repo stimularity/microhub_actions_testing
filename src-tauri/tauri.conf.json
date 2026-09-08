@@ -1,0 +1,14 @@
+{
+  "build": {
+    "beforeBuildCommand": "",
+    "beforeDevCommand": "",
+    "frontendDist": "../src/dist"
+  },
+  "tauri": {
+    "bundle": {
+      "active": true,
+      "targets": ["all"]
+    }
+  }
+}
+
