@@ -7,8 +7,19 @@
   "tauri": {
     "bundle": {
       "active": true,
-      "targets": ["all"]
-    }
+      "targets": "all",
+      "identifier": "com.microhub.desktop" 
+    },
+    "allowlist": {
+      "all": true
+    },
+    "windows": [
+      {
+        "title": "MicroHub Desktop",
+        "width": 1024,
+        "height": 768
+      }
+    ]
   }
 }
 
