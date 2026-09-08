@@ -1,10 +1,10 @@
-name: Build Desktop App
+name: Build Tauri R-Shiny Desktop App
 
 on:
-  push:
-    branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
+  #push:
+  #  branches: [ main, master ]
+  #pull_request:
+  #  branches: [ main, master ]
   workflow_dispatch:
 
 jobs:
@@ -41,15 +41,20 @@ jobs:
 
       - name: Install and Run Shinylive Export
         run: |
-          options(repos = c(CRAN = "https://r-project.org"))
-          install.packages(c("shiny", "shinylive"))
-          # Exports shiny app code into static assets for Tauri's frontend
-          shinylive::export(appdir = ".", destdir = "src/dist")
+          # Use the secure global cloud mirror managed by RStudio/Posit
+          options(repos = c(CRAN = "https://cloud.r-project.org"))
+          install.packages(c("shiny", "shinylive"), type = "binary")
+          
+          # Create target folder explicitly
+          dir.create("src/dist", recursive = TRUE, showWarnings = FALSE)
+          
+          # Safely export the root directory assets
+          shinylive::export(appdir = getwd(), destdir = "src/dist")
         shell: Rscript {0}
       # --- END R SHINYLIVE EXPORT SYSTEM ---
 
-      # Tauri action requires a package.json file to map dependencies, even if minimal
-      - name: Initialize Dummy Frontend Config (If missing)
+      # Tauri action requires a package.json file to map dependencies
+      - name: Initialize Frontend Config
         run: |
           if [ ! -f package.json ]; then
             echo '{"name":"shiny-tauri","version":"1.0.0","private":true,"scripts":{"tauri":"tauri"}}' > package.json
@@ -82,4 +87,3 @@ jobs:
             src-tauri/target/release/bundle/dmg/*.dmg
             src-tauri/target/release/bundle/appimage/*.AppImage
           if-no-files-found: error
-
