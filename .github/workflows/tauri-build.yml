@@ -10,7 +10,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform: [macos-latest, ubuntu-22.04, windows-latest]
+        platform: [macos-latest]
 
     steps:
       - name: Checkout Repository
@@ -81,7 +81,4 @@ jobs:
           name: DesktopApp-${{ matrix.platform }}
           path: |
             src-tauri/target/release/bundle/msi/*.msi
-            src-tauri/target/release/bundle/nsis/*.exe
-            src-tauri/target/release/bundle/dmg/*.dmg
-            src-tauri/target/release/bundle/appimage/*.AppImage
           if-no-files-found: error
