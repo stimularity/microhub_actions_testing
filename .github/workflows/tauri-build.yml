@@ -44,6 +44,20 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
+          # The bundled/signed outputs must never enter the cache.
+          cache-directories: |
+            !src-tauri/target/release/bundle
+
+      # A previously cached target/release/app comes back ad-hoc signed and
+      # with ACLs that make it undeletable, so cargo fails with EPERM when it
+      # tries to overwrite it. Clear the flags and the stale outputs.
+      - name: Clear stale build outputs
+        run: |
+          chflags -R nouchg src-tauri/target/release 2>/dev/null || true
+          chmod -RN src-tauri/target/release 2>/dev/null || true
+          rm -rf src-tauri/target/release/app src-tauri/target/release/bundle 2>/dev/null \
+            || sudo rm -rf src-tauri/target/release/app src-tauri/target/release/bundle
+          ls src-tauri/target/release 2>/dev/null | head || echo "no release dir"
 
       # The Shiny app itself, copied verbatim into the bundle. app.R sources
       # R/, ui/ and server/ and reads data/ relative to its working directory,
