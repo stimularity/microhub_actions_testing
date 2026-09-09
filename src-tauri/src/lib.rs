@@ -69,7 +69,9 @@ fn app_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
     return path.is_dir().then_some(path);
   }
 
-  let bundled = app.path().resource_dir().ok()?.join("app");
+  // "shinyapp", not "app": the latter collides with the binary name in the
+  // target directory that tauri-build stages resources into.
+  let bundled = app.path().resource_dir().ok()?.join("shinyapp");
   bundled.is_dir().then_some(bundled)
 }
 

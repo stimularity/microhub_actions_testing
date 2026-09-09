@@ -109,7 +109,7 @@ jobs:
         run: |
           app="src-tauri/target/release/bundle/macos/MicroHub.app"
           test -f "$app/Contents/Resources/runtime.tar.zst"
-          test -f "$app/Contents/Resources/app/app.R"
-          test -d "$app/Contents/Resources/app/data"
+          test -f "$app/Contents/Resources/shinyapp/app.R"
+          test -d "$app/Contents/Resources/shinyapp/data"
           du -sh "$app"
           ls -lh src-tauri/target/release/bundle/dmg/*.dmg

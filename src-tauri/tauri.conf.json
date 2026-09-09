@@ -38,7 +38,7 @@
     },
     "resources": {
       "resources/runtime.tar.zst": "runtime.tar.zst",
-      "resources/app": "app"
+      "resources/app": "shinyapp"
     }
   }
 }
