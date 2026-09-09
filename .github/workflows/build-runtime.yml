@@ -58,15 +58,22 @@ jobs:
           chmod +x tools/build-macos-runtime.sh
           tools/build-macos-runtime.sh "$PREFIX"
 
+      # gzip, not zstd: macOS ships tar without the zstd filter, so the app
+      # cannot unpack a .tar.zst ("Can't initialize filter").
       - name: Package runtime
         run: |
           cd "$(dirname "$PREFIX")"
-          tar -cf - "$(basename "$PREFIX")" | zstd -19 -T0 -o "$GITHUB_WORKSPACE/microhub-runtime-arm64.tar.zst"
-          ls -lh "$GITHUB_WORKSPACE/microhub-runtime-arm64.tar.zst"
+          tar -czf "$GITHUB_WORKSPACE/microhub-runtime-arm64.tar.gz" "$(basename "$PREFIX")"
+          ls -lh "$GITHUB_WORKSPACE/microhub-runtime-arm64.tar.gz"
+
+      - name: Confirm the archive unpacks with stock macOS tar
+        run: |
+          /usr/bin/tar -tzf microhub-runtime-arm64.tar.gz | head -3
+          echo "archive is readable by /usr/bin/tar"
 
       - name: Report size against the 2 GiB release-asset limit
         run: |
-          bytes=$(stat -f%z microhub-runtime-arm64.tar.zst)
+          bytes=$(stat -f%z microhub-runtime-arm64.tar.gz)
           echo "compressed: $((bytes / 1024 / 1024)) MiB"
           if [ "$bytes" -gt 2147483648 ]; then
             echo "::warning::runtime exceeds the 2 GiB GitHub release asset limit"
@@ -76,6 +83,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: macos-runtime
-          path: microhub-runtime-arm64.tar.zst
+          path: microhub-runtime-arm64.tar.gz
           retention-days: 7
           if-no-files-found: error

@@ -239,7 +239,7 @@ fn ensure_runtime(app: &tauri::AppHandle, window: &WebviewWindow) -> Result<(), 
     .path()
     .resource_dir()
     .ok()
-    .map(|dir| dir.join("runtime.tar.zst"))
+    .map(|dir| dir.join("runtime.tar.gz"))
     .filter(|path| {
       std::fs::metadata(path)
         .map(|meta| meta.is_file() && meta.len() > 0)
@@ -275,10 +275,9 @@ fn ensure_runtime(app: &tauri::AppHandle, window: &WebviewWindow) -> Result<(), 
   std::fs::create_dir_all(parent)
     .map_err(|e| format!("Could not create {}: {e}", parent.display()))?;
 
-  // bsdtar on macOS 13+ handles zstd natively.
+  // gzip: macOS tar has no zstd filter and fails with "Can't initialize filter".
   let status = Command::new("/usr/bin/tar")
-    .arg("--zstd")
-    .arg("-xf")
+    .arg("-xzf")
     .arg(&tarball)
     .arg("-C")
     .arg(parent)

@@ -112,7 +112,7 @@ pkgs.mkShell {
     # tauri.conf.json declares these as bundle resources; CI fills them with the
     # real runtime and app payload. Placeholders keep `tauri dev` working here.
     mkdir -p src-tauri/resources/app
-    [ -e src-tauri/resources/runtime.tar.zst ] || touch src-tauri/resources/runtime.tar.zst
+    [ -e src-tauri/resources/runtime.tar.gz ] || touch src-tauri/resources/runtime.tar.gz
 
     echo "microhub shinylive shell"
     echo "  export-app [appdir] [destdir]   shinylive::export (default . -> src/dist)"

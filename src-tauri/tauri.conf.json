@@ -37,7 +37,7 @@
       "debugApplicationIdSuffix": ".debug"
     },
     "resources": {
-      "resources/runtime.tar.zst": "runtime.tar.zst",
+      "resources/runtime.tar.gz": "runtime.tar.gz",
       "resources/app": "shinyapp"
     }
   }

@@ -76,9 +76,9 @@ jobs:
 
       - name: Check staged resources
         run: |
-          mv src-tauri/resources/microhub-runtime-arm64.tar.zst src-tauri/resources/runtime.tar.zst
+          mv src-tauri/resources/microhub-runtime-arm64.tar.gz src-tauri/resources/runtime.tar.gz
           ls -lh src-tauri/resources
-          test -f src-tauri/resources/runtime.tar.zst
+          test -f src-tauri/resources/runtime.tar.gz
           test -f src-tauri/resources/app/app.R
 
       # tauri-action runs `npm run tauri build`, so the CLI must be installed
@@ -108,7 +108,7 @@ jobs:
       - name: Verify the bundle contains the runtime and app
         run: |
           app="src-tauri/target/release/bundle/macos/MicroHub.app"
-          test -f "$app/Contents/Resources/runtime.tar.zst"
+          test -f "$app/Contents/Resources/runtime.tar.gz"
           test -f "$app/Contents/Resources/shinyapp/app.R"
           test -d "$app/Contents/Resources/shinyapp/data"
           du -sh "$app"
