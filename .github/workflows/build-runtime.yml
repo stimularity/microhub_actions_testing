@@ -75,11 +75,13 @@ jobs:
           # A truncated or partially built archive is the failure mode a small
           # file size would hide, so assert the pieces are actually in there.
           for required in \
-            MicroHub/R.framework/Resources/bin/R \
-            MicroHub/R.framework/Resources/library/INLA/DESCRIPTION \
-            MicroHub/python/bin/python3; do
-            echo "$listing" | grep -qx "$required" || {
-              echo "ERROR: $required missing from the archive" >&2
+            '/Resources/bin/R$' \
+            '/site-library/shiny/DESCRIPTION$' \
+            '/site-library/INLA/DESCRIPTION$' \
+            '/site-library/epiprocess/DESCRIPTION$' \
+            'MicroHub/python/bin/python3$'; do
+            echo "$listing" | grep -qE "$required" || {
+              echo "ERROR: nothing matching $required in the archive" >&2
               exit 1
             }
             echo "present: $required"

@@ -29,6 +29,15 @@ log() { printf '\n=== %s\n' "$*"; }
 install_r_packages() {
   log "installing R packages"
 
+  # Critical: install INTO the framework, not into R_LIBS_USER. CI runners
+  # point R_LIBS_USER at a temp directory outside R.framework, which the
+  # relocation would not copy -- the bundle would then ship without packages.
+  R_LIBS_TARGET="$(Rscript -e 'cat(normalizePath(file.path(R.home(), "site-library"), mustWork = FALSE))')"
+  mkdir -p "$R_LIBS_TARGET"
+  export R_LIBS_USER="$R_LIBS_TARGET"
+  export R_LIBS_SITE="$R_LIBS_TARGET"
+  echo "installing into $R_LIBS_TARGET"
+
   # Binary packages where possible; only the GitHub sources need compiling.
   Rscript -e '
     options(
@@ -272,7 +281,13 @@ verify() {
   # was rewritten during relocation. R_HOME is exported as well so anything
   # that re-execs Rscript inherits the correct location.
   local r_bin="$PREFIX/R.framework/Resources/bin/R"
+
+  # R_LIBS* are pointed at nothing so only the bundled libraries are
+  # reachable. Without this the check passes using the runner's own library.
   R_HOME="$PREFIX/R.framework/Resources" \
+  R_LIBS="" \
+  R_LIBS_USER="/nonexistent" \
+  R_LIBS_SITE="" \
   RETICULATE_PYTHON="$PREFIX/python/bin/python3" \
   "$r_bin" --no-save --no-restore --no-echo -e '
     pkgs <- c("shiny", "later", "dplyr", "ggplot2", "DT", "bslib", "shinyjs",
@@ -283,6 +298,7 @@ verify() {
       cat("ok  ", p, " ", as.character(packageVersion(p)), "\n", sep = "")
     }
     cat("R_HOME: ", R.home(), "\n", sep = "")
+    cat("libPaths:\n"); print(.libPaths())
   '
 
   # Informational: does the compiled-in R_HOME in the Rscript binary get
