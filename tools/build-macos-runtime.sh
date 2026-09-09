@@ -265,8 +265,15 @@ verify() {
   fi
 
   log "loading every package from the relocated runtime"
-  local rscript="$PREFIX/R.framework/Resources/bin/Rscript"
-  RETICULATE_PYTHON="$PREFIX/python/bin/python3" "$rscript" -e '
+
+  # Use bin/R, not bin/Rscript: Rscript is a binary with the original R_HOME
+  # compiled in as a string, whereas bin/R is a shell script whose R_HOME_DIR
+  # was rewritten during relocation. R_HOME is exported as well so anything
+  # that re-execs Rscript inherits the correct location.
+  local r_bin="$PREFIX/R.framework/Resources/bin/R"
+  R_HOME="$PREFIX/R.framework/Resources" \
+  RETICULATE_PYTHON="$PREFIX/python/bin/python3" \
+  "$r_bin" --no-save --no-restore --no-echo -e '
     pkgs <- c("shiny", "later", "dplyr", "ggplot2", "DT", "bslib", "shinyjs",
               "mgcv", "gam", "lightgbm", "slider", "scoringutils", "MMWRweek",
               "epiprocess", "simplets", "fmesher", "INLA")
@@ -276,6 +283,15 @@ verify() {
     }
     cat("R_HOME: ", R.home(), "\n", sep = "")
   '
+
+  # Informational: does the compiled-in R_HOME in the Rscript binary get
+  # overridden by the environment? Not required, since the app launches bin/R.
+  if R_HOME="$PREFIX/R.framework/Resources" \
+     "$PREFIX/R.framework/Resources/bin/Rscript" -e 'cat("Rscript R.home():", R.home(), "\n")'; then
+    :
+  else
+    echo "note: bin/Rscript needs R_HOME set; the app launches bin/R instead" >&2
+  fi
 
   "$PREFIX/python/bin/python3" -c '
 import torch, pandas, numpy

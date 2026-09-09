@@ -23,15 +23,19 @@ fn free_port() -> std::io::Result<u16> {
   listener.local_addr().map(|addr| addr.port())
 }
 
-/// Locate Rscript. Apps launched from Finder inherit a minimal PATH that omits
-/// the usual R install locations, so the known paths are probed explicitly.
+/// Locate the R launcher. Apps started from Finder inherit a minimal PATH that
+/// omits the usual R install locations, so known paths are probed explicitly.
+///
+/// The bundled runtime is driven through `bin/R` rather than `bin/Rscript`:
+/// Rscript is a binary carrying the original R_HOME as a compiled-in string,
+/// while `bin/R` is a shell script that relocation rewrites.
 fn rscript_path() -> Option<PathBuf> {
   if let Some(configured) = std::env::var_os("MICROHUB_R_BIN") {
     let path = PathBuf::from(configured);
     return path.is_file().then_some(path);
   }
 
-  let bundled = PathBuf::from(RUNTIME_PREFIX).join("R.framework/Resources/bin/Rscript");
+  let bundled = PathBuf::from(RUNTIME_PREFIX).join("R.framework/Resources/bin/R");
   if bundled.is_file() {
     return Some(bundled);
   }
@@ -90,6 +94,13 @@ fn spawn_shiny(rscript: &PathBuf, app_dir: &PathBuf, port: u16) -> std::io::Resu
   );
 
   let mut command = Command::new(rscript);
+
+  // Anything that re-execs Rscript (whose compiled-in R_HOME points at the
+  // system framework) needs this to find the relocated tree.
+  let bundled_home = PathBuf::from(RUNTIME_PREFIX).join("R.framework/Resources");
+  if bundled_home.is_dir() {
+    command.env("R_HOME", &bundled_home);
+  }
 
   // FourCAT's find_fourcat_python() takes RETICULATE_PYTHON first, so pointing
   // it at the bundled interpreter is all that is needed (see R/FourCAT.R:41).
