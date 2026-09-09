@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use tauri::{Manager, RunEvent, WebviewWindow};
 
 /// How long to wait for Shiny to start listening before giving up.
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(240);
 
 /// Fixed location of the bundled runtime. The runtime is built and relocated to
 /// this exact path in CI (tools/build-macos-runtime.sh), so the paths compiled
@@ -16,6 +16,38 @@ const RUNTIME_PREFIX: &str = "/Users/Shared/MicroHub";
 
 /// The R process backing the window, so it can be killed when the app exits.
 struct RProcess(Mutex<Option<Child>>);
+
+/// Where R's stdout/stderr is captured. Launched from Finder there is no
+/// terminal to inherit, so the log is the only way to see why R failed.
+fn log_path() -> Option<PathBuf> {
+  let home = std::env::var_os("HOME")?;
+  let dir = PathBuf::from(home).join("Library/Logs/MicroHub");
+  std::fs::create_dir_all(&dir).ok()?;
+  Some(dir.join("r-session.log"))
+}
+
+/// The last few lines of R's output, for display in the error box.
+fn log_tail(lines: usize) -> String {
+  let Some(path) = log_path() else {
+    return String::new();
+  };
+  let Ok(content) = std::fs::read_to_string(&path) else {
+    return String::new();
+  };
+  let tail: Vec<&str> = content
+    .lines()
+    .filter(|line| !line.trim().is_empty())
+    .rev()
+    .take(lines)
+    .collect();
+
+  if tail.is_empty() {
+    return String::new();
+  }
+
+  let body: Vec<&str> = tail.into_iter().rev().collect();
+  format!("\n\nLast output from R ({}):\n{}", path.display(), body.join("\n"))
+}
 
 /// Ask the OS for an unused port, then release it for R to bind.
 fn free_port() -> std::io::Result<u16> {
@@ -116,37 +148,64 @@ fn spawn_shiny(rscript: &PathBuf, app_dir: &PathBuf, port: u16) -> std::io::Resu
     .arg("--no-restore")
     .arg("-e")
     .arg(expr)
-    .current_dir(app_dir)
-    .stdout(Stdio::inherit())
-    .stderr(Stdio::inherit())
-    .spawn()
+    .current_dir(app_dir);
+
+  match log_path().and_then(|path| std::fs::File::create(path).ok()) {
+    Some(file) => {
+      let errors = file.try_clone()?;
+      command.stdout(Stdio::from(file)).stderr(Stdio::from(errors));
+    }
+    None => {
+      command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    }
+  }
+
+  command.spawn()
 }
 
-/// Poll until Shiny accepts connections, or the timeout expires.
-fn wait_for_port(port: u16, timeout: Duration) -> bool {
+/// Wait for Shiny to accept connections. Fails fast if R exits first, which is
+/// what happens when a library() call or the app code itself errors.
+fn wait_for_backend(child: &mut Child, port: u16, timeout: Duration) -> Result<(), String> {
   let addr = SocketAddr::from(([127, 0, 0, 1], port));
   let deadline = Instant::now() + timeout;
 
   while Instant::now() < deadline {
     if TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok() {
-      return true;
+      return Ok(());
     }
+
+    match child.try_wait() {
+      Ok(Some(status)) => {
+        return Err(format!("R exited before it started serving ({status}).{}", log_tail(25)))
+      }
+      Ok(None) => {}
+      Err(e) => return Err(format!("Could not check on the R process: {e}")),
+    }
+
     std::thread::sleep(Duration::from_millis(250));
   }
 
-  false
+  Err(format!(
+    "R did not start listening within {} seconds.{}",
+    timeout.as_secs(),
+    log_tail(25)
+  ))
 }
 
 /// Report a startup failure on the splash page rather than leaving it spinning.
 fn show_error(window: &WebviewWindow, message: &str) {
-  let escaped = message.replace('\\', "\\\\").replace('\'', "\\'");
-  let _ = window.eval(&format!("window.showError('{}')", escaped));
+  let _ = window.eval(&format!("window.showError({})", js_string(message)));
+}
+
+/// Encode a string as a JavaScript literal. Hand-rolled escaping breaks on the
+/// newlines in R's output, which silently kills the eval.
+fn js_string(value: &str) -> String {
+  serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
 }
 
 /// Update the splash text while a slow step runs.
 fn set_status(window: &WebviewWindow, message: &str) {
-  let escaped = message.replace('\\', "\\\\").replace('\'', "\\'");
-  let _ = window.eval(&format!("window.setStatus('{}')", escaped));
+  let _ = window.eval(&format!("window.setStatus({})", js_string(message)));
 }
 
 /// True when the runtime is present and was installed by this app version.
@@ -230,6 +289,14 @@ fn ensure_runtime(app: &tauri::AppHandle, window: &WebviewWindow) -> Result<(), 
     return Err(format!("Unpacking the runtime failed (tar exited with {status})"));
   }
 
+  // Anything the app writes inherits com.apple.quarantine, and Gatekeeper
+  // refuses to exec quarantined binaries that are only ad-hoc signed.
+  let _ = Command::new("/usr/bin/xattr")
+    .arg("-dr")
+    .arg("com.apple.quarantine")
+    .arg(&prefix)
+    .status();
+
   std::fs::write(prefix.join(".microhub-runtime-version"), &version)
     .map_err(|e| format!("Could not record the runtime version: {e}"))?;
 
@@ -254,21 +321,17 @@ fn start_backend(app: &tauri::AppHandle) -> Result<Child, String> {
   let port = free_port().map_err(|e| format!("Could not reserve a port: {e}"))?;
 
   log::info!("starting {} in {} on port {}", rscript.display(), app_dir.display(), port);
-  let child = spawn_shiny(&rscript, &app_dir, port).map_err(|e| format!("Could not start R: {e}"))?;
+  let mut child =
+    spawn_shiny(&rscript, &app_dir, port).map_err(|e| format!("Could not start R: {e}"))?;
 
   set_status(&window, "Starting the forecasting environment\u{2026}");
+  wait_for_backend(&mut child, port, STARTUP_TIMEOUT)?;
 
-  if wait_for_port(port, STARTUP_TIMEOUT) {
-    let url = format!("http://127.0.0.1:{port}");
-    let parsed = tauri::Url::parse(&url).map_err(|e| format!("Invalid URL {url}: {e}"))?;
-    window
-      .navigate(parsed)
-      .map_err(|e| format!("Could not open {url}: {e}"))?;
-  } else {
-    return Err(
-      "R did not start listening in time. Run from a terminal to see its output.".to_string(),
-    );
-  }
+  let url = format!("http://127.0.0.1:{port}");
+  let parsed = tauri::Url::parse(&url).map_err(|e| format!("Invalid URL {url}: {e}"))?;
+  window
+    .navigate(parsed)
+    .map_err(|e| format!("Could not open {url}: {e}"))?;
 
   Ok(child)
 }
