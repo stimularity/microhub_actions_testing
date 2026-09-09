@@ -75,6 +75,11 @@
     </main>
 
     <script>
+      // Called from Rust as slow startup steps progress.
+      window.setStatus = function (message) {
+        document.getElementById("detail").textContent = message;
+      };
+
       // Called from Rust when the backend fails to start.
       window.showError = function (message) {
         document.body.classList.add("failed");

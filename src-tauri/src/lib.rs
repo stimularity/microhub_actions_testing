@@ -1,5 +1,5 @@
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -130,10 +130,105 @@ fn show_error(window: &WebviewWindow, message: &str) {
   let _ = window.eval(&format!("window.showError('{}')", escaped));
 }
 
+/// Update the splash text while a slow step runs.
+fn set_status(window: &WebviewWindow, message: &str) {
+  let escaped = message.replace('\\', "\\\\").replace('\'', "\\'");
+  let _ = window.eval(&format!("window.setStatus('{}')", escaped));
+}
+
+/// True when the runtime is present and was installed by this app version.
+fn runtime_ready(prefix: &Path, version: &str) -> bool {
+  if !prefix.join("R.framework/Resources/bin/Rscript").is_file() {
+    return false;
+  }
+  std::fs::read_to_string(prefix.join(".microhub-runtime-version"))
+    .map(|installed| installed.trim() == version)
+    .unwrap_or(false)
+}
+
+/// Unpack the bundled runtime to its fixed path on first launch (and after an
+/// upgrade). The archive is built by tools/build-macos-runtime.sh with paths
+/// already baked in, so extraction is all that is required.
+fn ensure_runtime(app: &tauri::AppHandle, window: &WebviewWindow) -> Result<(), String> {
+  // A developer-supplied R takes priority and needs no bundled runtime.
+  if std::env::var_os("MICROHUB_R_BIN").is_some() {
+    return Ok(());
+  }
+
+  let prefix = PathBuf::from(RUNTIME_PREFIX);
+  let version = app.package_info().version.to_string();
+  if runtime_ready(&prefix, &version) {
+    return Ok(());
+  }
+
+  // A zero-byte file is the placeholder a dev checkout uses to satisfy the
+  // bundler; only a real archive counts as a bundled runtime.
+  let bundled = app
+    .path()
+    .resource_dir()
+    .ok()
+    .map(|dir| dir.join("runtime.tar.zst"))
+    .filter(|path| {
+      std::fs::metadata(path)
+        .map(|meta| meta.is_file() && meta.len() > 0)
+        .unwrap_or(false)
+    });
+
+  let tarball = match bundled {
+    Some(path) => path,
+    // No bundled runtime: a dev build. Fall back to whatever R is installed.
+    None => return Ok(()),
+  };
+
+  let parent = prefix
+    .parent()
+    .ok_or_else(|| format!("{RUNTIME_PREFIX} has no parent directory"))?;
+
+  if prefix.exists() {
+    // Refuse to recurse outside the intended location.
+    if !prefix.starts_with("/Users/Shared/") {
+      return Err(format!("refusing to remove {}", prefix.display()));
+    }
+    set_status(window, "Removing the previous runtime\u{2026}");
+    std::fs::remove_dir_all(&prefix)
+      .map_err(|e| format!("Could not remove the old runtime at {}: {e}", prefix.display()))?;
+  }
+
+  set_status(
+    window,
+    "Installing the R runtime. This happens once and takes a few minutes\u{2026}",
+  );
+  log::info!("extracting {} to {}", tarball.display(), parent.display());
+
+  std::fs::create_dir_all(parent)
+    .map_err(|e| format!("Could not create {}: {e}", parent.display()))?;
+
+  // bsdtar on macOS 13+ handles zstd natively.
+  let status = Command::new("/usr/bin/tar")
+    .arg("--zstd")
+    .arg("-xf")
+    .arg(&tarball)
+    .arg("-C")
+    .arg(parent)
+    .status()
+    .map_err(|e| format!("Could not run tar: {e}"))?;
+
+  if !status.success() {
+    return Err(format!("Unpacking the runtime failed (tar exited with {status})"));
+  }
+
+  std::fs::write(prefix.join(".microhub-runtime-version"), &version)
+    .map_err(|e| format!("Could not record the runtime version: {e}"))?;
+
+  Ok(())
+}
+
 fn start_backend(app: &tauri::AppHandle) -> Result<Child, String> {
   let window = app
     .get_webview_window("main")
     .ok_or_else(|| "main window is missing".to_string())?;
+
+  ensure_runtime(app, &window)?;
 
   let rscript = rscript_path().ok_or_else(|| {
     "Could not find R. Install R, or set MICROHUB_R_BIN to the Rscript binary.".to_string()
@@ -148,25 +243,19 @@ fn start_backend(app: &tauri::AppHandle) -> Result<Child, String> {
   log::info!("starting {} in {} on port {}", rscript.display(), app_dir.display(), port);
   let child = spawn_shiny(&rscript, &app_dir, port).map_err(|e| format!("Could not start R: {e}"))?;
 
-  // Polling blocks, so hand off to a worker and let setup() return.
-  std::thread::spawn(move || {
-    if wait_for_port(port, STARTUP_TIMEOUT) {
-      let url = format!("http://127.0.0.1:{port}");
-      match tauri::Url::parse(&url) {
-        Ok(parsed) => {
-          if let Err(e) = window.navigate(parsed) {
-            show_error(&window, &format!("Could not open {url}: {e}"));
-          }
-        }
-        Err(e) => show_error(&window, &format!("Invalid URL {url}: {e}")),
-      }
-    } else {
-      show_error(
-        &window,
-        "R did not start listening in time. Run from a terminal to see its output.",
-      );
-    }
-  });
+  set_status(&window, "Starting the forecasting environment\u{2026}");
+
+  if wait_for_port(port, STARTUP_TIMEOUT) {
+    let url = format!("http://127.0.0.1:{port}");
+    let parsed = tauri::Url::parse(&url).map_err(|e| format!("Invalid URL {url}: {e}"))?;
+    window
+      .navigate(parsed)
+      .map_err(|e| format!("Could not open {url}: {e}"))?;
+  } else {
+    return Err(
+      "R did not start listening in time. Run from a terminal to see its output.".to_string(),
+    );
+  }
 
   Ok(child)
 }
@@ -191,17 +280,20 @@ pub fn run() {
         }
       }
 
-      match start_backend(app.handle()) {
+      // Unpacking the runtime and booting R take minutes; keep setup() quick
+      // so the splash renders instead of the window hanging blank.
+      let handle = app.handle().clone();
+      std::thread::spawn(move || match start_backend(&handle) {
         Ok(child) => {
-          *app.state::<RProcess>().0.lock().unwrap() = Some(child);
+          *handle.state::<RProcess>().0.lock().unwrap() = Some(child);
         }
         Err(message) => {
           log::error!("{message}");
-          if let Some(window) = app.get_webview_window("main") {
+          if let Some(window) = handle.get_webview_window("main") {
             show_error(&window, &message);
           }
         }
-      }
+      });
 
       Ok(())
     })

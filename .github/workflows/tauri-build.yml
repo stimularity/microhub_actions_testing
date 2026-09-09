@@ -4,7 +4,13 @@ on:
   workflow_dispatch: # Triggers only when manually launched via the GitHub Actions tab
 
 jobs:
+  # Stage 2: the offline R + Python runtime. Slow (~1h) and independent of the
+  # Rust build, so it lives in its own reusable workflow.
+  runtime:
+    uses: ./.github/workflows/build-runtime.yml
+
   build:
+    needs: runtime
     name: Build for ${{ matrix.platform }}
     runs-on: ${{ matrix.platform }}
     permissions:
@@ -32,11 +38,28 @@ jobs:
         with:
           workspaces: src-tauri -> target
 
-      # NOTE: the shinylive export step was removed here. webR has no wasm
-      # builds of INLA/epiprocess/simplets and no subprocess support for the
-      # FourCAT Python model, so the app now runs against a real R process
-      # started by Tauri. Stage 2 adds the bundled R runtime to this workflow;
-      # until then the built app will report that it cannot find R.
+      # The Shiny app itself, copied verbatim into the bundle. app.R sources
+      # R/, ui/ and server/ and reads data/ relative to its working directory,
+      # which Tauri sets to this folder.
+      - name: Stage app payload
+        run: |
+          mkdir -p src-tauri/resources/app
+          cp app.R src-tauri/resources/app/
+          cp -R R ui server www data src-tauri/resources/app/
+          du -sh src-tauri/resources/app
+
+      - name: Download runtime bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-runtime
+          path: src-tauri/resources
+
+      - name: Check staged resources
+        run: |
+          mv src-tauri/resources/microhub-runtime-arm64.tar.zst src-tauri/resources/runtime.tar.zst
+          ls -lh src-tauri/resources
+          test -f src-tauri/resources/runtime.tar.zst
+          test -f src-tauri/resources/app/app.R
 
       # tauri-action runs `npm run tauri build`, so the CLI must be installed
       - name: Install Frontend Dependencies
@@ -52,6 +75,7 @@ jobs:
       # Publishes to a GitHub Release so the .dmg downloads directly:
       # upload-artifact would always wrap the bundles in a .zip.
       - name: Build and Publish Tauri Desktop Applications
+        id: tauri
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -60,3 +84,12 @@ jobs:
           releaseName: MicroHub v__VERSION__
           releaseDraft: false
           prerelease: false
+
+      - name: Verify the bundle contains the runtime and app
+        run: |
+          app="src-tauri/target/release/bundle/macos/MicroHub.app"
+          test -f "$app/Contents/Resources/runtime.tar.zst"
+          test -f "$app/Contents/Resources/app/app.R"
+          test -d "$app/Contents/Resources/app/data"
+          du -sh "$app"
+          ls -lh src-tauri/target/release/bundle/dmg/*.dmg

@@ -71,3 +71,4 @@ figures/*.png
 node_modules/
 src/dist/
 src-tauri/target/
+src-tauri/resources/

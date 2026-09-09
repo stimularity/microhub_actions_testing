@@ -35,6 +35,10 @@
     ],
     "android": {
       "debugApplicationIdSuffix": ".debug"
+    },
+    "resources": {
+      "resources/runtime.tar.zst": "runtime.tar.zst",
+      "resources/app": "app"
     }
   }
 }
