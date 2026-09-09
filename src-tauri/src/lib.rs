@@ -9,6 +9,15 @@ pub fn run() {
             .build(),
         )?;
       }
+
+      // Run the bundled app with MICROHUB_DEBUG=1 to open the web inspector.
+      if std::env::var("MICROHUB_DEBUG").is_ok() {
+        use tauri::Manager;
+        if let Some(window) = app.get_webview_window("main") {
+          window.open_devtools();
+        }
+      }
+
       Ok(())
     })
     .run(tauri::generate_context!())
