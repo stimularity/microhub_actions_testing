@@ -81,6 +81,12 @@ jobs:
           test -f src-tauri/resources/runtime.tar.gz
           test -f src-tauri/resources/app/app.R
 
+          # Identifies this runtime build. The app re-extracts whenever this
+          # differs from what is installed, so a rebuild at the same app
+          # version does not leave a stale runtime behind.
+          echo "${{ github.run_id }}-${{ github.sha }}" > src-tauri/resources/runtime.id
+          cat src-tauri/resources/runtime.id
+
       # tauri-action runs `npm run tauri build`, so the CLI must be installed
       - name: Install Frontend Dependencies
         run: npm ci
@@ -109,6 +115,7 @@ jobs:
         run: |
           app="src-tauri/target/release/bundle/macos/MicroHub.app"
           test -f "$app/Contents/Resources/runtime.tar.gz"
+          test -f "$app/Contents/Resources/runtime.id"
           test -f "$app/Contents/Resources/shinyapp/app.R"
           test -d "$app/Contents/Resources/shinyapp/data"
           du -sh "$app"

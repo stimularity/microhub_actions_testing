@@ -208,13 +208,29 @@ fn set_status(window: &WebviewWindow, message: &str) {
   let _ = window.eval(&format!("window.setStatus({})", js_string(message)));
 }
 
-/// True when the runtime is present and was installed by this app version.
-fn runtime_ready(prefix: &Path, version: &str) -> bool {
-  if !prefix.join("R.framework/Resources/bin/Rscript").is_file() {
+/// Identifies the runtime that *should* be installed. CI writes a build id
+/// next to the archive; without it (dev builds) fall back to the app version.
+/// Keying on the app version alone means a rebuilt runtime at the same version
+/// is never re-extracted, leaving a stale tree in place.
+fn expected_runtime_id(app: &tauri::AppHandle) -> String {
+  app
+    .path()
+    .resource_dir()
+    .ok()
+    .map(|dir| dir.join("runtime.id"))
+    .and_then(|path| std::fs::read_to_string(path).ok())
+    .map(|id| id.trim().to_string())
+    .filter(|id| !id.is_empty())
+    .unwrap_or_else(|| app.package_info().version.to_string())
+}
+
+/// True when the installed runtime matches the one this build ships.
+fn runtime_ready(prefix: &Path, expected: &str) -> bool {
+  if !prefix.join("R.framework/Resources/bin/R").is_file() {
     return false;
   }
   std::fs::read_to_string(prefix.join(".microhub-runtime-version"))
-    .map(|installed| installed.trim() == version)
+    .map(|installed| installed.trim() == expected)
     .unwrap_or(false)
 }
 
@@ -228,10 +244,11 @@ fn ensure_runtime(app: &tauri::AppHandle, window: &WebviewWindow) -> Result<(), 
   }
 
   let prefix = PathBuf::from(RUNTIME_PREFIX);
-  let version = app.package_info().version.to_string();
-  if runtime_ready(&prefix, &version) {
+  let expected = expected_runtime_id(app);
+  if runtime_ready(&prefix, &expected) {
     return Ok(());
   }
+  log::info!("installing runtime {expected}");
 
   // A zero-byte file is the placeholder a dev checkout uses to satisfy the
   // bundler; only a real archive counts as a bundled runtime.
@@ -296,7 +313,7 @@ fn ensure_runtime(app: &tauri::AppHandle, window: &WebviewWindow) -> Result<(), 
     .arg(&prefix)
     .status();
 
-  std::fs::write(prefix.join(".microhub-runtime-version"), &version)
+  std::fs::write(prefix.join(".microhub-runtime-version"), &expected)
     .map_err(|e| format!("Could not record the runtime version: {e}"))?;
 
   Ok(())

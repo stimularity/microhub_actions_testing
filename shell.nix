@@ -113,6 +113,7 @@ pkgs.mkShell {
     # real runtime and app payload. Placeholders keep `tauri dev` working here.
     mkdir -p src-tauri/resources/app
     [ -e src-tauri/resources/runtime.tar.gz ] || touch src-tauri/resources/runtime.tar.gz
+    [ -e src-tauri/resources/runtime.id ] || echo dev > src-tauri/resources/runtime.id
 
     echo "microhub shinylive shell"
     echo "  export-app [appdir] [destdir]   shinylive::export (default . -> src/dist)"
