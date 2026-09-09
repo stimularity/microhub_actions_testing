@@ -95,6 +95,17 @@ pkgs.mkShell {
     pkgs.nodejs_24
     export-app
     serve-dist
+
+    # Tauri desktop build (Linux host; the shipped app is built on macOS in CI)
+    pkgs.rustc
+    pkgs.cargo
+    pkgs.pkg-config
+    pkgs.webkitgtk_4_1
+    pkgs.gtk3
+    pkgs.libsoup_3
+    pkgs.openssl
+    pkgs.glib-networking
+    pkgs.librsvg
   ];
 
   shellHook = ''
