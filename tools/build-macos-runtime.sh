@@ -7,6 +7,12 @@
 # are identical.
 #
 # Usage: tools/build-macos-runtime.sh [prefix]
+#
+# Environment:
+#   SKIP_PACKAGES=1   reuse the R packages already installed in the system R
+#   SKIP_PYTHON=1     reuse an existing $PREFIX/python
+#   HIDE_SYSTEM_R=1   during verification, temporarily move the system
+#                     R.framework aside (CI only -- destructive on a dev Mac)
 set -euo pipefail
 
 PREFIX="${1:-/Users/Shared/MicroHub}"
@@ -181,7 +187,7 @@ relocate_r() {
       [ -z "$dep" ] && continue
       local new
       if [[ "$dep" == "${R_SRC}/"* ]]; then
-        new="${PREFIX}/R.framework${dep#$R_SRC}"
+        new="${PREFIX}/R.framework${dep#"$R_SRC"}"
       else
         new="${PREFIX}/lib/$(basename "$dep")"
       fi
@@ -199,16 +205,43 @@ relocate_r() {
 }
 
 # ---------------------------------------------------------------------------
-# 4. Prove the tree is self-contained: hide the system R, then use only $PREFIX.
+# 4. Prove the tree is self-contained.
 # ---------------------------------------------------------------------------
-verify() {
-  log "verifying relocated runtime with the system R hidden"
 
-  if [ -d "$R_SRC" ]; then
+# Static check: nothing in the relocated tree may still point at the system R.
+# This catches missed rewrites without touching the machine's R install.
+check_no_system_refs() {
+  log "checking for leftover references to ${R_SRC}"
+
+  local offenders=0
+  while IFS= read -r f; do
+    is_macho "$f" || continue
+    if otool -L "$f" 2>/dev/null | tail -n +2 | grep -q "^\s*${R_SRC}"; then
+      echo "LEAKS: $f" >&2
+      offenders=$((offenders + 1))
+    fi
+  done < <(find "$PREFIX/R.framework" -type f \
+             \( -name '*.dylib' -o -name '*.so' -o -perm -u+x \) 2>/dev/null)
+
+  if [ "$offenders" -gt 0 ]; then
+    echo "ERROR: ${offenders} binaries still reference the system R" >&2
+    return 1
+  fi
+  echo "no binaries reference ${R_SRC}"
+}
+
+verify() {
+  check_no_system_refs
+
+  # Optional and destructive: proves isolation by making the system R
+  # unavailable. Restored on exit, including on failure.
+  if [ "${HIDE_SYSTEM_R:-0}" = "1" ] && [ -d "$R_SRC" ]; then
+    log "hiding the system R for the duration of verification"
     sudo mv "$R_SRC" "${R_SRC}.hidden"
     trap 'sudo mv "${R_SRC}.hidden" "$R_SRC" 2>/dev/null || true' EXIT
   fi
 
+  log "loading every package from the relocated runtime"
   local rscript="$PREFIX/R.framework/Resources/bin/Rscript"
   RETICULATE_PYTHON="$PREFIX/python/bin/python3" "$rscript" -e '
     pkgs <- c("shiny", "later", "dplyr", "ggplot2", "DT", "bslib", "shinyjs",
@@ -232,8 +265,8 @@ print("ok   torch", torch.__version__, "pandas", pandas.__version__, "numpy", nu
 
 main() {
   mkdir -p "$PREFIX"
-  install_r_packages
-  install_python
+  [ "${SKIP_PACKAGES:-0}" = "1" ] || install_r_packages
+  [ "${SKIP_PYTHON:-0}" = "1" ] || install_python
   relocate_r
   verify
   log "runtime ready at ${PREFIX}"

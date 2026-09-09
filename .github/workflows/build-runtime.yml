@@ -39,6 +39,11 @@ jobs:
           xcodebuild -version 2>/dev/null | head -1 || true
 
       - name: Build runtime
+        # HIDE_SYSTEM_R makes verification move the runner's R.framework aside,
+        # so a pass proves the bundle does not depend on it. Safe here; it is
+        # off by default for local runs on a developer Mac.
+        env:
+          HIDE_SYSTEM_R: "1"
         run: |
           chmod +x tools/build-macos-runtime.sh
           tools/build-macos-runtime.sh "$PREFIX"
