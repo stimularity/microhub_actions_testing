@@ -13,6 +13,7 @@
 #   SKIP_PYTHON=1     reuse an existing $PREFIX/python
 #   HIDE_SYSTEM_R=1   during verification, temporarily move the system
 #                     R.framework aside (CI only -- destructive on a dev Mac)
+#   STRICT_VERIFY=0   warn instead of failing when verification does not pass
 set -euo pipefail
 
 PREFIX="${1:-/Users/Shared/MicroHub}"
@@ -307,7 +308,14 @@ main() {
   [ "${SKIP_PACKAGES:-0}" = "1" ] || install_r_packages
   [ "${SKIP_PYTHON:-0}" = "1" ] || install_python
   relocate_r
-  verify
+
+  # STRICT_VERIFY=0 downgrades verification to a warning, so a DMG can still be
+  # produced and tested by hand when a check is failing.
+  if [ "${STRICT_VERIFY:-1}" = "1" ]; then
+    verify
+  else
+    verify || echo "::warning::runtime verification FAILED; the bundle may not work"
+  fi
   log "runtime ready at ${PREFIX}"
 }
 
