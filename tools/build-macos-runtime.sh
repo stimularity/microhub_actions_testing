@@ -113,7 +113,13 @@ external_deps() {
     | awk '{print $1}' \
     | grep -E '^/' \
     | grep -vE '^(/usr/lib|/System/Library)' \
+    | grep -v '^/opt/X11/' \
     | grep -v "^${PREFIX}/" || true
+}
+
+# The library's own install id (LC_ID_DYLIB), if it has one.
+install_id() {
+  otool -D "$1" 2>/dev/null | tail -n +2 | head -1
 }
 
 relocate_r() {
@@ -177,10 +183,14 @@ relocate_r() {
     [ -z "$f" ] && continue
     chmod u+w "$f" 2>/dev/null || true
 
-    # Only libraries we copied into $PREFIX/lib need their id corrected;
-    # rewriting ids elsewhere would point at files that do not exist.
+    # A library's id must name its new location: a stale id pointing into the
+    # system framework is what check_no_system_refs flags.
+    local id
+    id="$(install_id "$f")"
     if [[ "$f" == "${PREFIX}/lib/"* ]]; then
       install_name_tool -id "$f" "$f" 2>/dev/null || true
+    elif [[ "$id" == "${R_SRC}/"* ]]; then
+      install_name_tool -id "${PREFIX}/R.framework${id#"$R_SRC"}" "$f" 2>/dev/null || true
     fi
 
     while IFS= read -r dep; do
@@ -190,6 +200,9 @@ relocate_r() {
         new="${PREFIX}/R.framework${dep#"$R_SRC"}"
       else
         new="${PREFIX}/lib/$(basename "$dep")"
+        # Bundling failed for this one; leaving the original path is more
+        # honest than pointing at a file that does not exist.
+        [ -f "$new" ] || continue
       fi
       install_name_tool -change "$dep" "$new" "$f" 2>/dev/null || true
     done < <(external_deps "$f")
@@ -216,8 +229,18 @@ check_no_system_refs() {
   local offenders=0
   while IFS= read -r f; do
     is_macho "$f" || continue
-    if otool -L "$f" 2>/dev/null | tail -n +2 | grep -q "^\s*${R_SRC}"; then
-      echo "LEAKS: $f" >&2
+
+    local id
+    id="$(install_id "$f")"
+    if [[ "$id" == "${R_SRC}/"* ]]; then
+      echo "LEAKS (id):  $f" >&2
+      offenders=$((offenders + 1))
+    fi
+
+    # Skip the id line so only genuine dependencies are considered here.
+    if otool -L "$f" 2>/dev/null | tail -n +2 | grep -v "^\s*${id}" \
+         | grep -q "^\s*${R_SRC}"; then
+      echo "LEAKS (dep): $f" >&2
       offenders=$((offenders + 1))
     fi
   done < <(find "$PREFIX/R.framework" -type f \
