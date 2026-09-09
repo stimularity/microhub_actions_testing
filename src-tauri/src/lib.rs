@@ -9,6 +9,11 @@ use tauri::{Manager, RunEvent, WebviewWindow};
 /// How long to wait for Shiny to start listening before giving up.
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Fixed location of the bundled runtime. The runtime is built and relocated to
+/// this exact path in CI (tools/build-macos-runtime.sh), so the paths compiled
+/// into R's binaries are valid on the user's machine without further fixups.
+const RUNTIME_PREFIX: &str = "/Users/Shared/MicroHub";
+
 /// The R process backing the window, so it can be killed when the app exits.
 struct RProcess(Mutex<Option<Child>>);
 
@@ -24,6 +29,11 @@ fn rscript_path() -> Option<PathBuf> {
   if let Some(configured) = std::env::var_os("MICROHUB_R_BIN") {
     let path = PathBuf::from(configured);
     return path.is_file().then_some(path);
+  }
+
+  let bundled = PathBuf::from(RUNTIME_PREFIX).join("R.framework/Resources/bin/Rscript");
+  if bundled.is_file() {
+    return Some(bundled);
   }
 
   let candidates = [
@@ -79,7 +89,16 @@ fn spawn_shiny(rscript: &PathBuf, app_dir: &PathBuf, port: u16) -> std::io::Resu
     port = port
   );
 
-  Command::new(rscript)
+  let mut command = Command::new(rscript);
+
+  // FourCAT's find_fourcat_python() takes RETICULATE_PYTHON first, so pointing
+  // it at the bundled interpreter is all that is needed (see R/FourCAT.R:41).
+  let bundled_python = PathBuf::from(RUNTIME_PREFIX).join("python/bin/python3");
+  if bundled_python.is_file() {
+    command.env("RETICULATE_PYTHON", &bundled_python);
+  }
+
+  command
     .arg("--no-save")
     .arg("--no-restore")
     .arg("-e")

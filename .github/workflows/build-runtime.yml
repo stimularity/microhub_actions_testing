@@ -1,0 +1,66 @@
+name: Build macOS Runtime Bundle
+
+# Stage 2: assemble the offline R + Python runtime that the desktop app ships.
+# Kept separate from the app build so the (slow) runtime can be iterated on and
+# cached independently of the Rust build.
+
+on:
+  workflow_dispatch:
+  workflow_call:
+    outputs:
+      artifact:
+        description: Name of the uploaded runtime artifact
+        value: macos-runtime
+
+jobs:
+  runtime:
+    name: Build runtime for Apple Silicon
+    runs-on: macos-latest # arm64
+    timeout-minutes: 120
+
+    env:
+      PREFIX: /Users/Shared/MicroHub
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # Installs R into /Library/Frameworks/R.framework, which is what the INLA
+      # binaries expect. The relocation script moves it afterwards.
+      - name: Setup R
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: "4.5.1"
+
+      - name: Report toolchain
+        run: |
+          R --version | head -1
+          echo "arch: $(uname -m)"
+          xcodebuild -version 2>/dev/null | head -1 || true
+
+      - name: Build runtime
+        run: |
+          chmod +x tools/build-macos-runtime.sh
+          tools/build-macos-runtime.sh "$PREFIX"
+
+      - name: Package runtime
+        run: |
+          cd "$(dirname "$PREFIX")"
+          tar -cf - "$(basename "$PREFIX")" | zstd -19 -T0 -o "$GITHUB_WORKSPACE/microhub-runtime-arm64.tar.zst"
+          ls -lh "$GITHUB_WORKSPACE/microhub-runtime-arm64.tar.zst"
+
+      - name: Report size against the 2 GiB release-asset limit
+        run: |
+          bytes=$(stat -f%z microhub-runtime-arm64.tar.zst)
+          echo "compressed: $((bytes / 1024 / 1024)) MiB"
+          if [ "$bytes" -gt 2147483648 ]; then
+            echo "::warning::runtime exceeds the 2 GiB GitHub release asset limit"
+          fi
+
+      - name: Upload runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-runtime
+          path: microhub-runtime-arm64.tar.zst
+          retention-days: 7
+          if-no-files-found: error
