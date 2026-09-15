@@ -30,4 +30,8 @@ tauri-plugin-log = "2"
 windows-sys = { version = "0.59", features = [
   "Win32_Foundation",
   "Win32_System_JobObjects",
+  # CreateJobObjectW takes a SECURITY_ATTRIBUTES pointer, and
+  # JOBOBJECT_EXTENDED_LIMIT_INFORMATION embeds IO_COUNTERS; both are gated.
+  "Win32_Security",
+  "Win32_System_Threading",
 ] }
