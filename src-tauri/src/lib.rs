@@ -40,7 +40,7 @@ fn runtime_prefix() -> PathBuf {
 /// single portable .exe: CI concatenates the runtime archive onto the linked
 /// binary followed by [u64 length][magic], rather than embedding it with
 /// include_bytes! -- an 800 MB array makes LLVM run out of memory.
-const PAYLOAD_MAGIC: &[u8; 8] = *&b"MHPAYLD1";
+const PAYLOAD_MAGIC: &[u8; 8] = b"MHPAYLD1";
 const PAYLOAD_TRAILER_LEN: u64 = 16;
 
 /// Length of the payload appended to `path`, if one is there.
@@ -69,6 +69,38 @@ fn appended_payload_len(path: &Path) -> Option<u64> {
     return None;
   }
   Some(len)
+}
+
+/// Unpack the runtime archive.
+///
+/// On Windows tar opens a console window regardless, so it is run through cmd
+/// with a title and a short explanation, and verbosely, so the user sees
+/// progress instead of a silent black box for several minutes.
+#[cfg(target_os = "windows")]
+fn run_extract(tar_bin: &str, tarball: &Path, dest: &Path) -> Result<std::process::ExitStatus, String> {
+  let script = format!(
+    "title MicroHub first-time setup     &echo ==============================================     &echo  MicroHub is installing its R runtime.     &echo.     &echo  This happens once, and takes a few minutes.     &echo  The app opens by itself when this finishes.     &echo  You can leave this window alone.     &echo ==============================================     &echo.     &"{tar}" -xvzf "{src}" -C "{dst}"     &echo.     &echo  Done. Starting MicroHub...",
+    tar = tar_bin,
+    src = tarball.display(),
+    dst = dest.display()
+  );
+
+  Command::new("cmd")
+    .arg("/c")
+    .arg(script)
+    .status()
+    .map_err(|e| format!("Could not run tar: {e}"))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn run_extract(tar_bin: &str, tarball: &Path, dest: &Path) -> Result<std::process::ExitStatus, String> {
+  Command::new(tar_bin)
+    .arg("-xzf")
+    .arg(tarball)
+    .arg("-C")
+    .arg(dest)
+    .status()
+    .map_err(|e| format!("Could not run tar: {e}"))
 }
 
 /// Copy an appended payload out to `dest`, streaming so an 800 MB archive is
@@ -534,8 +566,19 @@ fn ensure_runtime(app: &tauri::AppHandle, window: &WebviewWindow) -> Result<(), 
   );
   log::info!("extracting {} to {}", tarball.display(), parent.display());
 
-  std::fs::create_dir_all(parent)
-    .map_err(|e| format!("Could not create {}: {e}", parent.display()))?;
+  // The archives differ: the macOS one contains a top-level MicroHub/
+  // directory, so it unpacks into the prefix's parent, while the Windows one
+  // holds R/, python/ and shinyapp/ at the root and must unpack into the
+  // prefix itself. Getting this wrong scatters the runtime across
+  // %LOCALAPPDATA% and leaves the prefix missing entirely.
+  let extract_into = if cfg!(target_os = "windows") {
+    prefix.clone()
+  } else {
+    parent.to_path_buf()
+  };
+
+  std::fs::create_dir_all(&extract_into)
+    .map_err(|e| format!("Could not create {}: {e}", extract_into.display()))?;
 
   // gzip: macOS tar has no zstd filter and fails with "Can't initialize filter".
   // Windows 10+ ships the same bsdtar as tar.exe.
@@ -544,16 +587,25 @@ fn ensure_runtime(app: &tauri::AppHandle, window: &WebviewWindow) -> Result<(), 
   #[cfg(not(target_os = "windows"))]
   let tar_bin = "/usr/bin/tar";
 
-  let status = Command::new(tar_bin)
-    .arg("-xzf")
-    .arg(&tarball)
-    .arg("-C")
-    .arg(parent)
-    .status()
-    .map_err(|e| format!("Could not run tar: {e}"))?;
+  let status = run_extract(tar_bin, &tarball, &extract_into)?;
 
   if !status.success() {
-    return Err(format!("Unpacking the runtime failed (tar exited with {status})"));
+    return Err(format!(
+      "Unpacking the runtime failed: {tar_bin} exited with {status}\n\
+       archive: {}\n\
+       destination: {}",
+      tarball.display(),
+      extract_into.display()
+    ));
+  }
+
+  // The archive must actually have produced a usable R.
+  if bundled_r(&prefix).is_none() {
+    return Err(format!(
+      "The runtime unpacked but no R was found under {}. Expected one of: {}",
+      prefix.display(),
+      BUNDLED_R_CANDIDATES.join(", ")
+    ));
   }
 
   // Anything the app writes inherits com.apple.quarantine, and Gatekeeper
