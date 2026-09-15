@@ -47,7 +47,9 @@ jobs:
       - name: Assert the payload is complete
         shell: pwsh
         run: |
-          $listing = & tar.exe -tzf payload.tar.gz
+          # System32 tar (bsdtar), not msys2's GNU tar from Rtools.
+          $tar = Join-Path $env:SystemRoot 'System32\tar.exe'
+          $listing = & $tar -tzf payload.tar.gz
           Write-Host "entries: $($listing.Count)"
 
           # A truncated payload would pass a size check but fail on a user's PC.

@@ -20,6 +20,12 @@ $ProgressPreference = 'SilentlyContinue'
 $PythonVersion = '3.11.9'
 $PythonRelease = '20240415'
 
+# Windows' own bsdtar, by full path. A bare `tar.exe` resolves to msys2's GNU
+# tar once Rtools is on PATH, and that treats "C:\..." as a remote host:path
+# spec ("Cannot connect to C: resolve failed").
+$TarExe = Join-Path $env:SystemRoot 'System32\tar.exe'
+if (-not (Test-Path $TarExe)) { $TarExe = 'tar.exe' }
+
 function Write-Step($message) {
   Write-Host ""
   Write-Host "=== $message"
@@ -125,7 +131,7 @@ function Install-Python($pythonDir) {
   if (Test-Path $pythonDir) { Remove-Item -Recurse -Force $pythonDir }
 
   # The archive contains a top-level python\ directory.
-  & tar.exe -xzf $archive -C (Split-Path -Parent $pythonDir)
+  & $TarExe -xzf $archive -C (Split-Path -Parent $pythonDir)
   if ($LASTEXITCODE -ne 0) { throw "python extraction failed" }
 
   $python = "$pythonDir\python.exe"
@@ -213,7 +219,7 @@ Add-ShinyApp $Staging
 Test-Runtime $rHome $pythonDir
 
 Write-Step "archiving to $Output"
-& tar.exe -czf $Output -C $Staging 'R' 'python' 'shinyapp'
+& $TarExe -czf $Output -C $Staging 'R' 'python' 'shinyapp'
 if ($LASTEXITCODE -ne 0) { throw "archive failed" }
 
 $size = (Get-Item $Output).Length
