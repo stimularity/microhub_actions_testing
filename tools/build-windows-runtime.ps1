@@ -86,19 +86,26 @@ pak::pkg_install(c(
   Invoke-R $rHome $code 'package install'
 
   $code = @'
-options(timeout = 1200)
+# type = 'binary' is required, not a preference: when the repo's source
+# version is newer than its binary, R silently prefers the source, and the
+# INLA source tarball is a repackaged binary whose install script fails
+# under Rtools ("cp: unknown option -- )").
+options(timeout = 1200, install.packages.check.source = 'no')
 install.packages('fmesher',
   repos = c(inlabruorg = 'https://inlabru-org.r-universe.dev', CRAN = 'https://cloud.r-project.org'),
+  type = 'binary',
   dependencies = c('Depends', 'Imports', 'LinkingTo'))
 '@
   Invoke-R $rHome $code 'fmesher install'
 
   $code = @'
-options(timeout = 1800)
+options(timeout = 1800, install.packages.check.source = 'no')
 install.packages('INLA',
   repos = c(INLA = 'https://inla.r-inla-download.org/R/stable', CRAN = 'https://cloud.r-project.org'),
+  type = 'binary',
   dependencies = c('Depends', 'Imports', 'LinkingTo'))
 library(INLA)
+cat('INLA ', as.character(packageVersion('INLA')), '\n', sep = '')
 stopifnot(packageVersion('fmesher') >= '0.5.0')
 '@
   Invoke-R $rHome $code 'INLA install'
