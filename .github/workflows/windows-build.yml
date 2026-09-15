@@ -36,7 +36,8 @@ jobs:
       - name: Report toolchain
         shell: pwsh
         run: |
-          R --version | Select-Object -First 1
+          # R.exe, not R: PowerShell aliases `r` to Invoke-History.
+          & R.exe --version | Select-Object -First 1
           Write-Host "arch: $env:PROCESSOR_ARCHITECTURE"
 
       - name: Build payload
