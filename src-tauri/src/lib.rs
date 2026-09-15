@@ -9,10 +9,39 @@ use tauri::{Manager, RunEvent, WebviewWindow};
 /// How long to wait for Shiny to start listening before giving up.
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(240);
 
-/// Fixed location of the bundled runtime. The runtime is built and relocated to
-/// this exact path in CI (tools/build-macos-runtime.sh), so the paths compiled
-/// into R's binaries are valid on the user's machine without further fixups.
-const RUNTIME_PREFIX: &str = "/Users/Shared/MicroHub";
+/// Where the bundled runtime is installed.
+///
+/// macOS: a fixed path, because R.framework has absolute paths baked into its
+/// binaries and CI relocates them to exactly this location.
+/// Windows: per-user and writable without admin. R for Windows derives R_HOME
+/// from the executable location, so the path does not have to be fixed.
+#[cfg(target_os = "macos")]
+fn runtime_prefix() -> PathBuf {
+  PathBuf::from("/Users/Shared/MicroHub")
+}
+
+#[cfg(target_os = "windows")]
+fn runtime_prefix() -> PathBuf {
+  std::env::var_os("LOCALAPPDATA")
+    .map(PathBuf::from)
+    .unwrap_or_else(|| PathBuf::from("C:\\"))
+    .join("MicroHub")
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn runtime_prefix() -> PathBuf {
+  std::env::var_os("HOME")
+    .map(PathBuf::from)
+    .unwrap_or_else(|| PathBuf::from("/tmp"))
+    .join(".microhub")
+}
+
+/// The Windows build is a single portable .exe, so the payload (R, Python and
+/// the Shiny app) is compiled into the binary rather than shipped beside it.
+/// build.rs creates an empty placeholder when CI has not staged a real one.
+#[cfg(target_os = "windows")]
+static WINDOWS_PAYLOAD: &[u8] =
+  include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/resources/payload.tar.gz"));
 
 /// The R process backing the window, so it can be killed when the app exits.
 struct RProcess(Mutex<Option<Child>>);
@@ -20,8 +49,15 @@ struct RProcess(Mutex<Option<Child>>);
 /// Where R's stdout/stderr is captured. Launched from Finder there is no
 /// terminal to inherit, so the log is the only way to see why R failed.
 fn log_path() -> Option<PathBuf> {
-  let home = std::env::var_os("HOME")?;
-  let dir = PathBuf::from(home).join("Library/Logs/MicroHub");
+  #[cfg(target_os = "windows")]
+  let dir = runtime_prefix().join("Logs");
+
+  #[cfg(target_os = "macos")]
+  let dir = PathBuf::from(std::env::var_os("HOME")?).join("Library/Logs/MicroHub");
+
+  #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+  let dir = PathBuf::from(std::env::var_os("HOME")?).join("Library/Logs/MicroHub");
+
   std::fs::create_dir_all(&dir).ok()?;
   Some(dir.join("r-session.log"))
 }
@@ -55,6 +91,21 @@ fn free_port() -> std::io::Result<u16> {
   listener.local_addr().map(|addr| addr.port())
 }
 
+/// Path to the R launcher inside the runtime tree.
+///
+/// macOS uses `bin/R` (a shell script that relocation rewrites) because
+/// `bin/Rscript` is a binary with the original R_HOME compiled in. Windows R is
+/// relocatable, so `Rscript.exe` is used directly.
+#[cfg(target_os = "windows")]
+const BUNDLED_R_RELATIVE: &str = "R\\bin\\x64\\Rscript.exe";
+#[cfg(not(target_os = "windows"))]
+const BUNDLED_R_RELATIVE: &str = "R.framework/Resources/bin/R";
+
+#[cfg(target_os = "windows")]
+const RSCRIPT_EXE: &str = "Rscript.exe";
+#[cfg(not(target_os = "windows"))]
+const RSCRIPT_EXE: &str = "Rscript";
+
 /// Locate the R launcher. Apps started from Finder inherit a minimal PATH that
 /// omits the usual R install locations, so known paths are probed explicitly.
 ///
@@ -67,11 +118,18 @@ fn rscript_path() -> Option<PathBuf> {
     return path.is_file().then_some(path);
   }
 
-  let bundled = PathBuf::from(RUNTIME_PREFIX).join("R.framework/Resources/bin/R");
+  let bundled = runtime_prefix().join(BUNDLED_R_RELATIVE);
   if bundled.is_file() {
     return Some(bundled);
   }
 
+  #[cfg(target_os = "windows")]
+  let candidates = [
+    "C:\\Program Files\\R\\bin\\x64\\Rscript.exe",
+    "C:\\Program Files\\R\\bin\\Rscript.exe",
+  ];
+
+  #[cfg(not(target_os = "windows"))]
   let candidates = [
     "/Library/Frameworks/R.framework/Resources/bin/Rscript",
     "/opt/homebrew/bin/Rscript",
@@ -87,7 +145,7 @@ fn rscript_path() -> Option<PathBuf> {
       // Fall back to PATH, which is how `tauri dev` normally finds R.
       std::env::var_os("PATH").and_then(|paths| {
         std::env::split_paths(&paths)
-          .map(|dir| dir.join("Rscript"))
+          .map(|dir| dir.join(RSCRIPT_EXE))
           .find(|path| path.is_file())
       })
     })
@@ -101,15 +159,41 @@ fn app_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
     return path.is_dir().then_some(path);
   }
 
+  // Windows ships one portable .exe, so the app is inside the unpacked payload
+  // rather than beside the binary.
+  #[cfg(target_os = "windows")]
+  {
+    let _ = app;
+    let bundled = runtime_prefix().join("shinyapp");
+    return bundled.is_dir().then_some(bundled);
+  }
+
   // "shinyapp", not "app": the latter collides with the binary name in the
   // target directory that tauri-build stages resources into.
-  let bundled = app.path().resource_dir().ok()?.join("shinyapp");
-  bundled.is_dir().then_some(bundled)
+  #[cfg(not(target_os = "windows"))]
+  {
+    let bundled = app.path().resource_dir().ok()?.join("shinyapp");
+    bundled.is_dir().then_some(bundled)
+  }
 }
 
 fn spawn_shiny(rscript: &PathBuf, app_dir: &PathBuf, port: u16) -> std::io::Result<Child> {
+  // R parses forward slashes on every platform; backslashes would need
+  // escaping through two layers of quoting.
+  let app_dir_arg = app_dir.to_string_lossy().replace('\\', "/");
+
+  // Windows has no kill(2); a Job Object handles orphan cleanup there instead
+  // (see assign_to_job), so no watchdog is injected.
+  #[cfg(target_os = "windows")]
+  let expr = format!(
+    "shiny::runApp(appDir = {app_dir:?}, port = {port}, host = '127.0.0.1', launch.browser = FALSE)",
+    app_dir = app_dir_arg,
+    port = port
+  );
+
   // RunEvent::Exit covers a clean quit, but not SIGKILL or a crash. The
   // watchdog makes R responsible for noticing that its parent is gone.
+  #[cfg(not(target_os = "windows"))]
   let expr = format!(
     "if (requireNamespace('later', quietly = TRUE)) {{ \
        local({{ \
@@ -123,24 +207,42 @@ fn spawn_shiny(rscript: &PathBuf, app_dir: &PathBuf, port: u16) -> std::io::Resu
      }}; \
      shiny::runApp(appDir = {app_dir:?}, port = {port}, host = '127.0.0.1', launch.browser = FALSE)",
     parent = std::process::id(),
-    app_dir = app_dir.to_string_lossy(),
+    app_dir = app_dir_arg,
     port = port
   );
 
   let mut command = Command::new(rscript);
 
-  // Anything that re-execs Rscript (whose compiled-in R_HOME points at the
-  // system framework) needs this to find the relocated tree.
-  let bundled_home = PathBuf::from(RUNTIME_PREFIX).join("R.framework/Resources");
-  if bundled_home.is_dir() {
-    command.env("R_HOME", &bundled_home);
+  // R_HOME is set only where R needs telling. On Windows R derives it from the
+  // executable's location and an explicit value would override that wrongly.
+  #[cfg(not(target_os = "windows"))]
+  {
+    // Anything that re-execs Rscript (whose compiled-in R_HOME points at the
+    // system framework) needs this to find the relocated tree.
+    let bundled_home = runtime_prefix().join("R.framework/Resources");
+    if bundled_home.is_dir() {
+      command.env("R_HOME", &bundled_home);
+    }
   }
 
   // FourCAT's find_fourcat_python() takes RETICULATE_PYTHON first, so pointing
   // it at the bundled interpreter is all that is needed (see R/FourCAT.R:41).
-  let bundled_python = PathBuf::from(RUNTIME_PREFIX).join("python/bin/python3");
+  // python-build-standalone lays Windows out flat: python\python.exe.
+  #[cfg(target_os = "windows")]
+  let bundled_python = runtime_prefix().join("python\\python.exe");
+  #[cfg(not(target_os = "windows"))]
+  let bundled_python = runtime_prefix().join("python/bin/python3");
+
   if bundled_python.is_file() {
     command.env("RETICULATE_PYTHON", &bundled_python);
+  }
+
+  // Without this a console window flashes up behind the app.
+  #[cfg(target_os = "windows")]
+  {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
   }
 
   command
@@ -160,7 +262,54 @@ fn spawn_shiny(rscript: &PathBuf, app_dir: &PathBuf, port: u16) -> std::io::Resu
     }
   }
 
-  command.spawn()
+  let child = command.spawn()?;
+
+  // Windows: tie R's lifetime to this process so a crash cannot orphan it.
+  #[cfg(target_os = "windows")]
+  if let Err(e) = assign_to_job(&child) {
+    log::warn!("could not assign R to a job object: {e}");
+  }
+
+  Ok(child)
+}
+
+/// Put the child in a job object that kills it when this process goes away.
+/// Replaces the unix `kill -0` watchdog, which has no Windows equivalent and
+/// would flash a console window if polled with tasklist.
+#[cfg(target_os = "windows")]
+fn assign_to_job(child: &Child) -> Result<(), String> {
+  use std::os::windows::io::AsRawHandle;
+  use windows_sys::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
+    JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+  };
+
+  unsafe {
+    let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+    if job.is_null() {
+      return Err("CreateJobObjectW failed".to_string());
+    }
+
+    let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if SetInformationJobObject(
+      job,
+      JobObjectExtendedLimitInformation,
+      &info as *const _ as *const std::ffi::c_void,
+      std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+    ) == 0
+    {
+      return Err("SetInformationJobObject failed".to_string());
+    }
+
+    if AssignProcessToJobObject(job, child.as_raw_handle() as _) == 0 {
+      return Err("AssignProcessToJobObject failed".to_string());
+    }
+  }
+
+  // The job handle is deliberately never closed: closing it would kill R.
+  Ok(())
 }
 
 /// Wait for Shiny to accept connections. Fails fast if R exits first, which is
@@ -213,6 +362,19 @@ fn set_status(window: &WebviewWindow, message: &str) {
 /// Keying on the app version alone means a rebuilt runtime at the same version
 /// is never re-extracted, leaving a stale tree in place.
 fn expected_runtime_id(app: &tauri::AppHandle) -> String {
+  // Windows embeds the payload in the binary, so the id is stamped in at
+  // compile time by CI rather than read from a resource file.
+  #[cfg(target_os = "windows")]
+  {
+    if let Some(id) = option_env!("MICROHUB_RUNTIME_ID") {
+      if !id.trim().is_empty() {
+        return id.trim().to_string();
+      }
+    }
+    return app.package_info().version.to_string();
+  }
+
+  #[cfg(not(target_os = "windows"))]
   app
     .path()
     .resource_dir()
@@ -226,7 +388,7 @@ fn expected_runtime_id(app: &tauri::AppHandle) -> String {
 
 /// True when the installed runtime matches the one this build ships.
 fn runtime_ready(prefix: &Path, expected: &str) -> bool {
-  if !prefix.join("R.framework/Resources/bin/R").is_file() {
+  if !prefix.join(BUNDLED_R_RELATIVE).is_file() {
     return false;
   }
   std::fs::read_to_string(prefix.join(".microhub-runtime-version"))
@@ -243,39 +405,56 @@ fn ensure_runtime(app: &tauri::AppHandle, window: &WebviewWindow) -> Result<(), 
     return Ok(());
   }
 
-  let prefix = PathBuf::from(RUNTIME_PREFIX);
+  let prefix = runtime_prefix();
   let expected = expected_runtime_id(app);
   if runtime_ready(&prefix, &expected) {
     return Ok(());
   }
   log::info!("installing runtime {expected}");
 
+  // Windows carries the payload inside the binary, so it is written out to a
+  // temporary file before unpacking. An empty payload means a dev build.
+  #[cfg(target_os = "windows")]
+  let tarball = {
+    let _ = app;
+    if WINDOWS_PAYLOAD.is_empty() {
+      return Ok(());
+    }
+    let staged = std::env::temp_dir().join("microhub-payload.tar.gz");
+    std::fs::write(&staged, WINDOWS_PAYLOAD)
+      .map_err(|e| format!("Could not stage the payload at {}: {e}", staged.display()))?;
+    staged
+  };
+
   // A zero-byte file is the placeholder a dev checkout uses to satisfy the
   // bundler; only a real archive counts as a bundled runtime.
-  let bundled = app
-    .path()
-    .resource_dir()
-    .ok()
-    .map(|dir| dir.join("runtime.tar.gz"))
-    .filter(|path| {
-      std::fs::metadata(path)
-        .map(|meta| meta.is_file() && meta.len() > 0)
-        .unwrap_or(false)
-    });
+  #[cfg(not(target_os = "windows"))]
+  let tarball = {
+    let bundled = app
+      .path()
+      .resource_dir()
+      .ok()
+      .map(|dir| dir.join("runtime.tar.gz"))
+      .filter(|path| {
+        std::fs::metadata(path)
+          .map(|meta| meta.is_file() && meta.len() > 0)
+          .unwrap_or(false)
+      });
 
-  let tarball = match bundled {
-    Some(path) => path,
-    // No bundled runtime: a dev build. Fall back to whatever R is installed.
-    None => return Ok(()),
+    match bundled {
+      Some(path) => path,
+      // No bundled runtime: a dev build. Fall back to whatever R is installed.
+      None => return Ok(()),
+    }
   };
 
   let parent = prefix
     .parent()
-    .ok_or_else(|| format!("{RUNTIME_PREFIX} has no parent directory"))?;
+    .ok_or_else(|| format!("{} has no parent directory", prefix.display()))?;
 
   if prefix.exists() {
     // Refuse to recurse outside the intended location.
-    if !prefix.starts_with("/Users/Shared/") {
+    if prefix.file_name() != Some(std::ffi::OsStr::new("MicroHub")) {
       return Err(format!("refusing to remove {}", prefix.display()));
     }
     set_status(window, "Removing the previous runtime\u{2026}");
@@ -293,7 +472,13 @@ fn ensure_runtime(app: &tauri::AppHandle, window: &WebviewWindow) -> Result<(), 
     .map_err(|e| format!("Could not create {}: {e}", parent.display()))?;
 
   // gzip: macOS tar has no zstd filter and fails with "Can't initialize filter".
-  let status = Command::new("/usr/bin/tar")
+  // Windows 10+ ships the same bsdtar as tar.exe.
+  #[cfg(target_os = "windows")]
+  let tar_bin = "C:\\Windows\\System32\\tar.exe";
+  #[cfg(not(target_os = "windows"))]
+  let tar_bin = "/usr/bin/tar";
+
+  let status = Command::new(tar_bin)
     .arg("-xzf")
     .arg(&tarball)
     .arg("-C")
@@ -307,6 +492,7 @@ fn ensure_runtime(app: &tauri::AppHandle, window: &WebviewWindow) -> Result<(), 
 
   // Anything the app writes inherits com.apple.quarantine, and Gatekeeper
   // refuses to exec quarantined binaries that are only ad-hoc signed.
+  #[cfg(target_os = "macos")]
   let _ = Command::new("/usr/bin/xattr")
     .arg("-dr")
     .arg("com.apple.quarantine")

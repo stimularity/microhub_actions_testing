@@ -1,0 +1,180 @@
+name: Build Windows Portable App
+
+# Completely separate from the macOS pipeline by design: no shared jobs, no
+# reusable workflow calls, no triggers off the Mac build. Run manually when a
+# Windows build is wanted.
+#
+# Produces ONE portable MicroHub.exe. No installer, no admin rights: the R and
+# Python runtime is compiled into the binary and unpacked to
+# %LOCALAPPDATA%\MicroHub on first launch.
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Attach MicroHub.exe to the MicroHub release
+        type: boolean
+        default: true
+
+jobs:
+  runtime:
+    name: Build Windows runtime payload
+    runs-on: windows-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup R
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: "4.5.1"
+          # Rtools is needed for the GitHub source packages.
+          rtools-version: "45"
+
+      - name: Report toolchain
+        shell: pwsh
+        run: |
+          R --version | Select-Object -First 1
+          Write-Host "arch: $env:PROCESSOR_ARCHITECTURE"
+
+      - name: Build payload
+        shell: pwsh
+        run: pwsh tools/build-windows-runtime.ps1 -Output "$env:GITHUB_WORKSPACE\payload.tar.gz"
+
+      - name: Assert the payload is complete
+        shell: pwsh
+        run: |
+          $listing = & tar.exe -tzf payload.tar.gz
+          Write-Host "entries: $($listing.Count)"
+
+          # A truncated payload would pass a size check but fail on a user's PC.
+          $required = @(
+            'R/bin/x64/Rscript.exe',
+            'R/library/shiny/DESCRIPTION',
+            'R/library/INLA/DESCRIPTION',
+            'R/library/epiprocess/DESCRIPTION',
+            'python/python.exe',
+            'shinyapp/app.R'
+          )
+          foreach ($path in $required) {
+            if (-not ($listing -contains $path)) {
+              throw "missing from payload: $path"
+            }
+            Write-Host "present: $path"
+          }
+
+          $mb = [math]::Round((Get-Item payload.tar.gz).Length / 1MB)
+          Write-Host "payload size: $mb MB"
+          if ($mb -gt 1900) {
+            Write-Host "::warning::payload approaches GitHub's 2 GiB release asset limit"
+          }
+
+      - name: Upload payload
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-payload
+          path: payload.tar.gz
+          retention-days: 7
+          if-no-files-found: error
+
+  build:
+    needs: runtime
+    name: Build portable MicroHub.exe
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Download payload
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-payload
+          path: src-tauri/resources
+
+      - name: Stage build inputs
+        shell: pwsh
+        run: |
+          # The payload is already at src-tauri/resources/payload.tar.gz, where
+          # include_bytes! expects it.
+          if (-not (Test-Path src-tauri/resources/payload.tar.gz)) {
+            throw "payload.tar.gz was not downloaded"
+          }
+
+          # tauri.conf.json's bundle.resources is shared with the macOS build.
+          # Windows embeds its payload in the binary instead, so these only need
+          # to exist; they ship empty and ensure_runtime ignores them.
+          New-Item -ItemType Directory -Force -Path src-tauri/resources/app | Out-Null
+          if (-not (Test-Path src-tauri/resources/runtime.tar.gz)) {
+            New-Item -ItemType File -Force -Path src-tauri/resources/runtime.tar.gz | Out-Null
+          }
+          Set-Content -Path src-tauri/resources/runtime.id -Value "windows-placeholder"
+
+          Get-ChildItem src-tauri/resources | Format-Table Name, Length
+
+      - name: Install Frontend Dependencies
+        run: npm ci
+
+      - name: Build portable exe
+        shell: pwsh
+        # --no-bundle: emit just the .exe, no NSIS/MSI installer.
+        # MICROHUB_RUNTIME_ID is compiled in and decides when an installed
+        # runtime is stale and must be re-unpacked.
+        env:
+          MICROHUB_RUNTIME_ID: ${{ github.run_id }}-${{ github.sha }}
+        run: npm run tauri build -- --no-bundle
+
+      - name: Collect the exe
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem src-tauri/target/release/*.exe |
+            Where-Object { $_.Name -notlike '*build-script*' } |
+            Select-Object -First 1
+          if (-not $exe) { throw "no exe produced" }
+
+          Copy-Item $exe.FullName MicroHub.exe -Force
+          $mb = [math]::Round((Get-Item MicroHub.exe).Length / 1MB)
+          Write-Host "MicroHub.exe: $mb MB"
+          if ($mb -gt 1900) {
+            throw "MicroHub.exe exceeds GitHub's 2 GiB release asset limit"
+          }
+
+      - name: Upload exe as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MicroHub-windows-x64
+          path: MicroHub.exe
+          if-no-files-found: error
+
+      # Attaches to the same release the macOS workflow publishes, so one page
+      # carries both downloads. Creates the release only if it does not exist.
+      - name: Attach to the MicroHub release
+        if: inputs.publish
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $version = (Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json).version
+          $tag = "app-v$version"
+
+          gh release view $tag 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --title "MicroHub v$version" --notes "MicroHub desktop builds."
+          }
+
+          gh release upload $tag MicroHub.exe --clobber
+          Write-Host "uploaded MicroHub.exe to $tag"
