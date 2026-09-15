@@ -36,12 +36,64 @@ fn runtime_prefix() -> PathBuf {
     .join(".microhub")
 }
 
-/// The Windows build is a single portable .exe, so the payload (R, Python and
-/// the Shiny app) is compiled into the binary rather than shipped beside it.
-/// build.rs creates an empty placeholder when CI has not staged a real one.
-#[cfg(target_os = "windows")]
-static WINDOWS_PAYLOAD: &[u8] =
-  include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/resources/payload.tar.gz"));
+/// Marks a payload appended to the executable. The Windows build ships as a
+/// single portable .exe: CI concatenates the runtime archive onto the linked
+/// binary followed by [u64 length][magic], rather than embedding it with
+/// include_bytes! -- an 800 MB array makes LLVM run out of memory.
+const PAYLOAD_MAGIC: &[u8; 8] = *&b"MHPAYLD1";
+const PAYLOAD_TRAILER_LEN: u64 = 16;
+
+/// Length of the payload appended to `path`, if one is there.
+fn appended_payload_len(path: &Path) -> Option<u64> {
+  use std::io::{Read, Seek, SeekFrom};
+
+  let mut file = std::fs::File::open(path).ok()?;
+  let size = file.metadata().ok()?.len();
+  if size < PAYLOAD_TRAILER_LEN {
+    return None;
+  }
+
+  file.seek(SeekFrom::End(-(PAYLOAD_TRAILER_LEN as i64))).ok()?;
+  let mut trailer = [0u8; PAYLOAD_TRAILER_LEN as usize];
+  file.read_exact(&mut trailer).ok()?;
+
+  if &trailer[8..] != PAYLOAD_MAGIC {
+    return None;
+  }
+
+  let len = u64::from_le_bytes(trailer[..8].try_into().ok()?);
+  // The payload plus its trailer cannot be larger than the file itself.
+  // checked_add matters: a corrupt trailer claiming u64::MAX would otherwise
+  // wrap and pass this check in a release build.
+  if len == 0 || len.checked_add(PAYLOAD_TRAILER_LEN)? > size {
+    return None;
+  }
+  Some(len)
+}
+
+/// Copy an appended payload out to `dest`, streaming so an 800 MB archive is
+/// never held in memory.
+fn extract_appended_payload(source: &Path, dest: &Path) -> Result<(), String> {
+  use std::io::{Seek, SeekFrom};
+
+  let len = appended_payload_len(source).ok_or_else(|| "no payload appended".to_string())?;
+  let size = std::fs::metadata(source)
+    .map_err(|e| format!("Could not stat {}: {e}", source.display()))?
+    .len();
+
+  let mut file =
+    std::fs::File::open(source).map_err(|e| format!("Could not open {}: {e}", source.display()))?;
+  file
+    .seek(SeekFrom::Start(size - PAYLOAD_TRAILER_LEN - len))
+    .map_err(|e| format!("Could not seek to the payload: {e}"))?;
+
+  let mut out =
+    std::fs::File::create(dest).map_err(|e| format!("Could not create {}: {e}", dest.display()))?;
+  std::io::copy(&mut std::io::Read::take(file, len), &mut out)
+    .map_err(|e| format!("Could not write the payload to {}: {e}", dest.display()))?;
+
+  Ok(())
+}
 
 /// The R process backing the window, so it can be killed when the app exits.
 struct RProcess(Mutex<Option<Child>>);
@@ -426,12 +478,17 @@ fn ensure_runtime(app: &tauri::AppHandle, window: &WebviewWindow) -> Result<(), 
   #[cfg(target_os = "windows")]
   let tarball = {
     let _ = app;
-    if WINDOWS_PAYLOAD.is_empty() {
+    let exe = std::env::current_exe()
+      .map_err(|e| format!("Could not locate the running executable: {e}"))?;
+
+    // No appended payload: a dev build. Fall back to whatever R is installed.
+    if appended_payload_len(&exe).is_none() {
       return Ok(());
     }
+
+    set_status(window, "Preparing the runtime\u{2026}");
     let staged = std::env::temp_dir().join("microhub-payload.tar.gz");
-    std::fs::write(&staged, WINDOWS_PAYLOAD)
-      .map_err(|e| format!("Could not stage the payload at {}: {e}", staged.display()))?;
+    extract_appended_payload(&exe, &staged)?;
     staged
   };
 
@@ -596,4 +653,68 @@ pub fn run() {
       }
     }
   });
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use std::io::Write;
+
+  fn write_fake_exe(dir: &Path, body: &[u8], payload: Option<&[u8]>) -> PathBuf {
+    let path = dir.join("fake.exe");
+    let mut file = std::fs::File::create(&path).unwrap();
+    file.write_all(body).unwrap();
+    if let Some(payload) = payload {
+      file.write_all(payload).unwrap();
+      file.write_all(&(payload.len() as u64).to_le_bytes()).unwrap();
+      file.write_all(PAYLOAD_MAGIC).unwrap();
+    }
+    path
+  }
+
+  #[test]
+  fn finds_and_extracts_an_appended_payload() {
+    let dir = std::env::temp_dir().join(format!("microhub-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let payload = b"this stands in for the runtime archive";
+    let exe = write_fake_exe(&dir, b"MZ fake executable body", Some(payload));
+
+    assert_eq!(appended_payload_len(&exe), Some(payload.len() as u64));
+
+    let out = dir.join("payload.tar.gz");
+    extract_appended_payload(&exe, &out).unwrap();
+    assert_eq!(std::fs::read(&out).unwrap(), payload);
+
+    std::fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn ignores_an_executable_without_a_payload() {
+    let dir = std::env::temp_dir().join(format!("microhub-test-none-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let exe = write_fake_exe(&dir, b"MZ fake executable body with no payload", None);
+    assert_eq!(appended_payload_len(&exe), None);
+
+    std::fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn ignores_a_bogus_length() {
+    let dir = std::env::temp_dir().join(format!("microhub-test-bogus-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let path = dir.join("fake.exe");
+    let mut file = std::fs::File::create(&path).unwrap();
+    file.write_all(b"MZ short").unwrap();
+    // A length larger than the file itself must not be trusted.
+    file.write_all(&u64::MAX.to_le_bytes()).unwrap();
+    file.write_all(PAYLOAD_MAGIC).unwrap();
+    drop(file);
+
+    assert_eq!(appended_payload_len(&path), None);
+
+    std::fs::remove_dir_all(&dir).ok();
+  }
 }

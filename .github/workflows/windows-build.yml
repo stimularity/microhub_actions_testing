@@ -107,14 +107,12 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: windows-payload
-          path: src-tauri/resources
+          path: payload
 
       - name: Stage build inputs
         shell: pwsh
         run: |
-          # The payload is already at src-tauri/resources/payload.tar.gz, where
-          # include_bytes! expects it.
-          if (-not (Test-Path src-tauri/resources/payload.tar.gz)) {
+          if (-not (Test-Path payload/payload.tar.gz)) {
             throw "payload.tar.gz was not downloaded"
           }
 
@@ -150,8 +148,45 @@ jobs:
           if (-not $exe) { throw "no exe produced" }
 
           Copy-Item $exe.FullName MicroHub.exe -Force
+          Write-Host "linked exe: $([math]::Round((Get-Item MicroHub.exe).Length / 1MB)) MB"
+
+      # Append the payload to the linked binary, followed by
+      # [u64 little-endian length][magic]. The app reads its own file to find
+      # it. Compiling it in with include_bytes! instead makes LLVM OOM.
+      - name: Append the runtime payload to the exe
+        shell: pwsh
+        run: |
+          $payload = Get-Item payload/payload.tar.gz
+          $exe = [System.IO.File]::Open("$PWD/MicroHub.exe", 'Append', 'Write')
+          try {
+            $input = [System.IO.File]::OpenRead($payload.FullName)
+            try { $input.CopyTo($exe) } finally { $input.Dispose() }
+
+            $exe.Write([System.BitConverter]::GetBytes([uint64]$payload.Length), 0, 8)
+            $exe.Write([System.Text.Encoding]::ASCII.GetBytes('MHPAYLD1'), 0, 8)
+          } finally {
+            $exe.Dispose()
+          }
+
           $mb = [math]::Round((Get-Item MicroHub.exe).Length / 1MB)
-          Write-Host "MicroHub.exe: $mb MB"
+          Write-Host "MicroHub.exe with payload: $mb MB"
+
+          # Sanity check the trailer reads back the way the app expects.
+          $stream = [System.IO.File]::OpenRead("$PWD/MicroHub.exe")
+          try {
+            $stream.Seek(-16, 'End') | Out-Null
+            $trailer = New-Object byte[] 16
+            $stream.Read($trailer, 0, 16) | Out-Null
+          } finally {
+            $stream.Dispose()
+          }
+
+          $length = [System.BitConverter]::ToUInt64($trailer, 0)
+          $magic = [System.Text.Encoding]::ASCII.GetString($trailer, 8, 8)
+          if ($magic -ne 'MHPAYLD1') { throw "trailer magic is '$magic'" }
+          if ($length -ne $payload.Length) { throw "trailer length $length != $($payload.Length)" }
+          Write-Host "trailer ok: $length bytes"
+
           if ($mb -gt 1900) {
             throw "MicroHub.exe exceeds GitHub's 2 GiB release asset limit"
           }
