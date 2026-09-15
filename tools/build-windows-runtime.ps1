@@ -25,6 +25,14 @@ function Write-Step($message) {
   Write-Host "=== $message"
 }
 
+# 64-bit R keeps binaries in bin\x64; some layouts only have bin.
+function Get-RscriptPath($rHome) {
+  foreach ($candidate in @("$rHome\bin\x64\Rscript.exe", "$rHome\bin\Rscript.exe")) {
+    if (Test-Path $candidate) { return $candidate }
+  }
+  throw "no Rscript.exe under $rHome\bin"
+}
+
 # ---------------------------------------------------------------------------
 # 1. R packages, installed INTO the R tree.
 #
@@ -38,7 +46,7 @@ function Install-RPackages($rHome) {
   $env:R_LIBS_USER = "$rHome\library"
   $env:R_LIBS_SITE = "$rHome\library"
 
-  $rscript = "$rHome\bin\x64\Rscript.exe"
+  $rscript = Get-RscriptPath $rHome
 
   & $rscript -e @"
 options(repos = c(CRAN = 'https://cloud.r-project.org'), timeout = 1200)
@@ -115,7 +123,7 @@ function Test-Runtime($rHome, $pythonDir) {
   $env:R_LIBS_USER = 'nonexistent'
   $env:R_LIBS_SITE = ''
 
-  & "$rHome\bin\x64\Rscript.exe" -e @"
+  & (Get-RscriptPath $rHome) -e @"
 pkgs <- c('shiny', 'later', 'dplyr', 'ggplot2', 'DT', 'bslib', 'shinyjs',
           'mgcv', 'gam', 'lightgbm', 'slider', 'scoringutils', 'MMWRweek',
           'epiprocess', 'simplets', 'fmesher', 'INLA')
@@ -156,10 +164,16 @@ New-Item -ItemType Directory -Force -Path $Staging | Out-Null
 
 if (-not $SkipPackages) {
   Write-Step "copying the installed R into $rHome"
-  $installed = (Get-Command R.exe -ErrorAction SilentlyContinue).Source
-  if (-not $installed) { throw "R.exe not found on PATH" }
-  # ...\R\bin\x64\R.exe -> ...\R
-  $installedHome = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $installed))
+
+  # Ask R where it lives. Deriving this from the path of R.exe is fragile --
+  # the exe sits at different depths depending on the installer, and guessing
+  # wrong walks up to C:\ and tries to copy the whole drive.
+  $installedHome = (& R.exe RHOME | Select-Object -First 1).Trim()
+  if (-not $installedHome) { throw "could not determine R_HOME (is R on PATH?)" }
+  if (-not (Test-Path (Join-Path $installedHome 'bin'))) {
+    throw "R_HOME '$installedHome' has no bin directory"
+  }
+  Write-Host "R_HOME: $installedHome"
 
   if (Test-Path $rHome) { Remove-Item -Recurse -Force $rHome }
   Copy-Item $installedHome -Destination $rHome -Recurse -Force

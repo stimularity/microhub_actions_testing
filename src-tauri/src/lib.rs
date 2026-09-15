@@ -96,10 +96,20 @@ fn free_port() -> std::io::Result<u16> {
 /// macOS uses `bin/R` (a shell script that relocation rewrites) because
 /// `bin/Rscript` is a binary with the original R_HOME compiled in. Windows R is
 /// relocatable, so `Rscript.exe` is used directly.
+/// 64-bit R keeps its binaries in bin\x64, but some layouts only have bin;
+/// probe both rather than assuming.
 #[cfg(target_os = "windows")]
-const BUNDLED_R_RELATIVE: &str = "R\\bin\\x64\\Rscript.exe";
+const BUNDLED_R_CANDIDATES: [&str; 2] = ["R\\bin\\x64\\Rscript.exe", "R\\bin\\Rscript.exe"];
 #[cfg(not(target_os = "windows"))]
-const BUNDLED_R_RELATIVE: &str = "R.framework/Resources/bin/R";
+const BUNDLED_R_CANDIDATES: [&str; 1] = ["R.framework/Resources/bin/R"];
+
+/// The R launcher inside an installed runtime, if one is present.
+fn bundled_r(prefix: &Path) -> Option<PathBuf> {
+  BUNDLED_R_CANDIDATES
+    .iter()
+    .map(|relative| prefix.join(relative))
+    .find(|path| path.is_file())
+}
 
 #[cfg(target_os = "windows")]
 const RSCRIPT_EXE: &str = "Rscript.exe";
@@ -118,8 +128,7 @@ fn rscript_path() -> Option<PathBuf> {
     return path.is_file().then_some(path);
   }
 
-  let bundled = runtime_prefix().join(BUNDLED_R_RELATIVE);
-  if bundled.is_file() {
+  if let Some(bundled) = bundled_r(&runtime_prefix()) {
     return Some(bundled);
   }
 
@@ -388,7 +397,7 @@ fn expected_runtime_id(app: &tauri::AppHandle) -> String {
 
 /// True when the installed runtime matches the one this build ships.
 fn runtime_ready(prefix: &Path, expected: &str) -> bool {
-  if !prefix.join(BUNDLED_R_RELATIVE).is_file() {
+  if bundled_r(prefix).is_none() {
     return false;
   }
   std::fs::read_to_string(prefix.join(".microhub-runtime-version"))
