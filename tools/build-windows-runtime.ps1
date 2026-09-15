@@ -25,6 +25,24 @@ function Write-Step($message) {
   Write-Host "=== $message"
 }
 
+# Run R code from a temp file rather than `Rscript -e`.
+#
+# A multi-line here-string passed to -e arrives with CRLF line endings, which
+# R's parser rejects with "unexpected invalid token". A file also avoids every
+# layer of shell quoting.
+function Invoke-R($rHome, $code, $description) {
+  $script = Join-Path $env:TEMP ("microhub-" + [guid]::NewGuid().ToString('N') + ".R")
+  $normalised = $code -replace "`r`n", "`n"
+  [System.IO.File]::WriteAllText($script, $normalised, [System.Text.UTF8Encoding]::new($false))
+
+  try {
+    & (Get-RscriptPath $rHome) $script
+    if ($LASTEXITCODE -ne 0) { throw "$description failed (exit $LASTEXITCODE)" }
+  } finally {
+    Remove-Item $script -Force -ErrorAction SilentlyContinue
+  }
+}
+
 # 64-bit R keeps binaries in bin\x64; some layouts only have bin.
 function Get-RscriptPath($rHome) {
   foreach ($candidate in @("$rHome\bin\x64\Rscript.exe", "$rHome\bin\Rscript.exe")) {
@@ -46,15 +64,14 @@ function Install-RPackages($rHome) {
   $env:R_LIBS_USER = "$rHome\library"
   $env:R_LIBS_SITE = "$rHome\library"
 
-  $rscript = Get-RscriptPath $rHome
-
-  & $rscript -e @"
+  # Single-quoted here-strings: PowerShell must not interpolate $ in R code.
+  $code = @'
 options(repos = c(CRAN = 'https://cloud.r-project.org'), timeout = 1200)
 install.packages('pak')
-"@
-  if ($LASTEXITCODE -ne 0) { throw "pak install failed" }
+'@
+  Invoke-R $rHome $code 'pak install'
 
-  & $rscript -e @"
+  $code = @'
 options(repos = c(CRAN = 'https://cloud.r-project.org'), timeout = 1200)
 pak::pkg_install(c(
   'dplyr', 'readr', 'lubridate', 'tidyr', 'purrr', 'forcats', 'tibble',
@@ -65,26 +82,26 @@ pak::pkg_install(c(
   'cmu-delphi/epiprocess@main',
   'reichlab/simplets'
 ), ask = FALSE, upgrade = FALSE)
-"@
-  if ($LASTEXITCODE -ne 0) { throw "package install failed" }
+'@
+  Invoke-R $rHome $code 'package install'
 
-  & $rscript -e @"
+  $code = @'
 options(timeout = 1200)
 install.packages('fmesher',
   repos = c(inlabruorg = 'https://inlabru-org.r-universe.dev', CRAN = 'https://cloud.r-project.org'),
   dependencies = c('Depends', 'Imports', 'LinkingTo'))
-"@
-  if ($LASTEXITCODE -ne 0) { throw "fmesher install failed" }
+'@
+  Invoke-R $rHome $code 'fmesher install'
 
-  & $rscript -e @"
+  $code = @'
 options(timeout = 1800)
 install.packages('INLA',
   repos = c(INLA = 'https://inla.r-inla-download.org/R/stable', CRAN = 'https://cloud.r-project.org'),
   dependencies = c('Depends', 'Imports', 'LinkingTo'))
 library(INLA)
 stopifnot(packageVersion('fmesher') >= '0.5.0')
-"@
-  if ($LASTEXITCODE -ne 0) { throw "INLA install failed" }
+'@
+  Invoke-R $rHome $code 'INLA install'
 }
 
 # ---------------------------------------------------------------------------
@@ -123,7 +140,7 @@ function Test-Runtime($rHome, $pythonDir) {
   $env:R_LIBS_USER = 'nonexistent'
   $env:R_LIBS_SITE = ''
 
-  & (Get-RscriptPath $rHome) -e @"
+  $code = @'
 pkgs <- c('shiny', 'later', 'dplyr', 'ggplot2', 'DT', 'bslib', 'shinyjs',
           'mgcv', 'gam', 'lightgbm', 'slider', 'scoringutils', 'MMWRweek',
           'epiprocess', 'simplets', 'fmesher', 'INLA')
@@ -133,8 +150,8 @@ for (p in pkgs) {
 }
 cat('R_HOME: ', R.home(), '\n', sep = '')
 cat('libPaths:\n'); print(.libPaths())
-"@
-  if ($LASTEXITCODE -ne 0) { throw "R verification failed" }
+'@
+  Invoke-R $rHome $code 'R verification'
 
   & "$pythonDir\python.exe" -c "import torch, pandas, numpy; print('ok   torch', torch.__version__, 'pandas', pandas.__version__, 'numpy', numpy.__version__)"
   if ($LASTEXITCODE -ne 0) { throw "python verification failed" }
