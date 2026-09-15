@@ -71,6 +71,49 @@ fn appended_payload_len(path: &Path) -> Option<u64> {
   Some(len)
 }
 
+/// Directories left in `base` by builds that unpacked the Windows archive one
+/// level too high, scattering R/, python/ and shinyapp/ across %LOCALAPPDATA%.
+///
+/// Deliberately conservative: %LOCALAPPDATA%\R is also where a normal R install
+/// keeps a user's personal package library (R\win-library\...), and deleting
+/// that would destroy their own packages. All three markers must be present --
+/// a user library has no bin\Rscript.exe next to it, and nothing else ships a
+/// shinyapp\app.R -- so this only fires on our own mess.
+fn stray_runtime_dirs(base: &Path) -> Vec<PathBuf> {
+  let r_dir = base.join("R");
+  let python_dir = base.join("python");
+  let app_dir = base.join("shinyapp");
+
+  let has_r = r_dir.join("bin").join("x64").join("Rscript.exe").is_file()
+    || r_dir.join("bin").join("Rscript.exe").is_file();
+  let has_python = python_dir.join("python.exe").is_file();
+  let has_app = app_dir.join("app.R").is_file();
+
+  if has_r && has_python && has_app {
+    vec![r_dir, python_dir, app_dir]
+  } else {
+    Vec::new()
+  }
+}
+
+/// Remove a scattered runtime from an earlier build, so upgrading cleans up
+/// after it rather than leaving several hundred MB behind.
+fn remove_stray_runtime(base: &Path, window: &WebviewWindow) {
+  let stray = stray_runtime_dirs(base);
+  if stray.is_empty() {
+    return;
+  }
+
+  set_status(window, "Cleaning up a previous installation\u{2026}");
+  for dir in stray {
+    log::info!("removing stray runtime directory {}", dir.display());
+    if let Err(e) = std::fs::remove_dir_all(&dir) {
+      // Not fatal: it only costs disk space.
+      log::warn!("could not remove {}: {e}", dir.display());
+    }
+  }
+}
+
 /// Unpack the runtime archive.
 ///
 /// On Windows tar opens a console window regardless, so it is run through cmd
@@ -560,6 +603,13 @@ fn ensure_runtime(app: &tauri::AppHandle, window: &WebviewWindow) -> Result<(), 
       .map_err(|e| format!("Could not remove the old runtime at {}: {e}", prefix.display()))?;
   }
 
+  // Builds before e4bc57b unpacked to the parent directory; clear that up on
+  // upgrade instead of leaving it stranded.
+  #[cfg(target_os = "windows")]
+  if let Some(base) = prefix.parent() {
+    remove_stray_runtime(base, window);
+  }
+
   set_status(
     window,
     "Installing the R runtime. This happens once and takes a few minutes\u{2026}",
@@ -750,6 +800,55 @@ mod tests {
     assert_eq!(appended_payload_len(&exe), None);
 
     std::fs::remove_dir_all(&dir).ok();
+  }
+
+  fn touch(path: &Path) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, b"x").unwrap();
+  }
+
+  #[test]
+  fn spots_a_scattered_runtime() {
+    let base = std::env::temp_dir().join(format!("microhub-stray-{}", std::process::id()));
+    std::fs::create_dir_all(&base).unwrap();
+
+    touch(&base.join("R").join("bin").join("x64").join("Rscript.exe"));
+    touch(&base.join("python").join("python.exe"));
+    touch(&base.join("shinyapp").join("app.R"));
+
+    let found = stray_runtime_dirs(&base);
+    assert_eq!(found.len(), 3);
+    assert!(found.contains(&base.join("R")));
+
+    std::fs::remove_dir_all(&base).ok();
+  }
+
+  #[test]
+  fn leaves_a_users_own_r_library_alone() {
+    let base = std::env::temp_dir().join(format!("microhub-userlib-{}", std::process::id()));
+    std::fs::create_dir_all(&base).unwrap();
+
+    // What a real R install leaves in %LOCALAPPDATA%: a package library, with
+    // no interpreter beside it. Must never be touched.
+    touch(&base.join("R").join("win-library").join("4.5").join("dplyr").join("DESCRIPTION"));
+
+    assert!(stray_runtime_dirs(&base).is_empty());
+
+    std::fs::remove_dir_all(&base).ok();
+  }
+
+  #[test]
+  fn ignores_a_partial_match() {
+    let base = std::env::temp_dir().join(format!("microhub-partial-{}", std::process::id()));
+    std::fs::create_dir_all(&base).unwrap();
+
+    // R and python present but no shinyapp: not our layout, leave it.
+    touch(&base.join("R").join("bin").join("x64").join("Rscript.exe"));
+    touch(&base.join("python").join("python.exe"));
+
+    assert!(stray_runtime_dirs(&base).is_empty());
+
+    std::fs::remove_dir_all(&base).ok();
   }
 
   #[test]
