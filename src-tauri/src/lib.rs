@@ -120,19 +120,64 @@ fn remove_stray_runtime(base: &Path, window: &WebviewWindow) {
 /// with a title and a short explanation, and verbosely, so the user sees
 /// progress instead of a silent black box for several minutes.
 #[cfg(target_os = "windows")]
-fn run_extract(tar_bin: &str, tarball: &Path, dest: &Path) -> Result<std::process::ExitStatus, String> {
+fn run_extract(
+  tar_bin: &str,
+  source_exe: &Path,
+  dest: &Path,
+) -> Result<std::process::ExitStatus, String> {
+  // Built by joining on '&' rather than as one long literal, which rustfmt
+  // collapses into an unreadable line.
+  let banner = [
+    "title MicroHub first-time setup",
+    "echo ==============================================",
+    "echo  MicroHub is installing its R runtime.",
+    "echo.",
+    "echo  This happens once, and takes a few minutes.",
+    "echo  The app opens by itself when this finishes.",
+    "echo  You can leave this window alone.",
+    "echo ==============================================",
+    "echo.",
+  ]
+  .join("&");
+
   let script = format!(
-    "title MicroHub first-time setup     &echo ==============================================     &echo  MicroHub is installing its R runtime.     &echo.     &echo  This happens once, and takes a few minutes.     &echo  The app opens by itself when this finishes.     &echo  You can leave this window alone.     &echo ==============================================     &echo.     &"{tar}" -xvzf "{src}" -C "{dst}"     &echo.     &echo  Done. Starting MicroHub...",
+    "{banner}&\"{tar}\" -xvzf - -C \"{dst}\"&echo.&echo  Done. Starting MicroHub...",
+    banner = banner,
     tar = tar_bin,
-    src = tarball.display(),
     dst = dest.display()
   );
 
-  Command::new("cmd")
+  // tar reads the archive from stdin, fed straight from the payload appended
+  // to the .exe. Staging it to a temp file first would write and re-read
+  // ~800 MB for nothing. cmd passes its own stdin through to tar.
+  let mut child = Command::new("cmd")
     .arg("/c")
     .arg(script)
-    .status()
-    .map_err(|e| format!("Could not run tar: {e}"))
+    .stdin(Stdio::piped())
+    .spawn()
+    .map_err(|e| format!("Could not run tar: {e}"))?;
+
+  let mut reader = payload_reader(source_exe)?;
+  let mut stdin = child
+    .stdin
+    .take()
+    .ok_or_else(|| "tar did not accept a stdin pipe".to_string())?;
+
+  let copied = std::io::copy(&mut reader, &mut stdin);
+  // tar only finishes once the pipe is closed.
+  drop(stdin);
+
+  let status = child.wait().map_err(|e| format!("Could not wait for tar: {e}"))?;
+
+  // A write error here is usually a broken pipe caused by tar having already
+  // failed, so prefer tar's own status when it is non-zero.
+  if let Err(e) = copied {
+    if status.success() {
+      return Err(format!("Could not stream the payload to tar: {e}"));
+    }
+  }
+
+  Ok(status)
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -146,10 +191,10 @@ fn run_extract(tar_bin: &str, tarball: &Path, dest: &Path) -> Result<std::proces
     .map_err(|e| format!("Could not run tar: {e}"))
 }
 
-/// Copy an appended payload out to `dest`, streaming so an 800 MB archive is
-/// never held in memory.
-fn extract_appended_payload(source: &Path, dest: &Path) -> Result<(), String> {
-  use std::io::{Seek, SeekFrom};
+/// A reader over just the payload appended to `source`, positioned at its
+/// first byte and stopping at its last.
+fn payload_reader(source: &Path) -> Result<std::io::Take<std::fs::File>, String> {
+  use std::io::{Read, Seek, SeekFrom};
 
   let len = appended_payload_len(source).ok_or_else(|| "no payload appended".to_string())?;
   let size = std::fs::metadata(source)
@@ -162,9 +207,17 @@ fn extract_appended_payload(source: &Path, dest: &Path) -> Result<(), String> {
     .seek(SeekFrom::Start(size - PAYLOAD_TRAILER_LEN - len))
     .map_err(|e| format!("Could not seek to the payload: {e}"))?;
 
+  Ok(file.take(len))
+}
+
+/// Copy an appended payload out to `dest`, streaming so a large archive is
+/// never held in memory. Kept for the tests and the non-Windows path.
+#[allow(dead_code)]
+fn extract_appended_payload(source: &Path, dest: &Path) -> Result<(), String> {
+  let mut reader = payload_reader(source)?;
   let mut out =
     std::fs::File::create(dest).map_err(|e| format!("Could not create {}: {e}", dest.display()))?;
-  std::io::copy(&mut std::io::Read::take(file, len), &mut out)
+  std::io::copy(&mut reader, &mut out)
     .map_err(|e| format!("Could not write the payload to {}: {e}", dest.display()))?;
 
   Ok(())
@@ -548,8 +601,8 @@ fn ensure_runtime(app: &tauri::AppHandle, window: &WebviewWindow) -> Result<(), 
   }
   log::info!("installing runtime {expected}");
 
-  // Windows carries the payload inside the binary, so it is written out to a
-  // temporary file before unpacking. An empty payload means a dev build.
+  // Windows carries the payload inside the binary and streams it straight
+  // into tar, so there is nothing to stage. No payload means a dev build.
   #[cfg(target_os = "windows")]
   let tarball = {
     let _ = app;
@@ -561,10 +614,7 @@ fn ensure_runtime(app: &tauri::AppHandle, window: &WebviewWindow) -> Result<(), 
       return Ok(());
     }
 
-    set_status(window, "Preparing the runtime\u{2026}");
-    let staged = std::env::temp_dir().join("microhub-payload.tar.gz");
-    extract_appended_payload(&exe, &staged)?;
-    staged
+    exe
   };
 
   // A zero-byte file is the placeholder a dev checkout uses to satisfy the
