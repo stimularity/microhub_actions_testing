@@ -15,6 +15,12 @@ on:
         description: Attach MicroHub.exe to the MicroHub release
         type: boolean
         default: true
+  # Additive: lets build-all.yml invoke this. Manual runs are unaffected.
+  workflow_call:
+    inputs:
+      publish:
+        type: boolean
+        default: true
 
 jobs:
   runtime:

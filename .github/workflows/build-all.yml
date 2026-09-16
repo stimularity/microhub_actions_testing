@@ -1,0 +1,61 @@
+name: Build Everything (macOS + Windows)
+
+# Convenience wrapper that kicks off both platform builds in one click.
+#
+# It does NOT merge them: each platform still runs its own independent
+# workflow, on its own runner, with its own runtime build. Either can still be
+# run on its own from the Actions tab, and a failure on one platform does not
+# stop the other.
+
+on:
+  workflow_dispatch:
+    inputs:
+      strict_verify:
+        description: macOS - fail if the R runtime does not verify
+        type: boolean
+        default: true
+      publish:
+        description: Windows - attach MicroHub.exe to the release
+        type: boolean
+        default: true
+
+jobs:
+  macos:
+    name: macOS
+    uses: ./.github/workflows/tauri-build.yml
+    permissions:
+      contents: write
+    with:
+      strict_verify: ${{ inputs.strict_verify }}
+
+  windows:
+    name: Windows
+    uses: ./.github/workflows/windows-build.yml
+    permissions:
+      contents: write
+    with:
+      publish: ${{ inputs.publish }}
+
+  summary:
+    name: Summary
+    needs: [macos, windows]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report what was produced
+        run: |
+          {
+            echo "## MicroHub build results"
+            echo ""
+            echo "| Platform | Result |"
+            echo "| --- | --- |"
+            echo "| macOS (.dmg) | ${{ needs.macos.result }} |"
+            echo "| Windows (.exe) | ${{ needs.windows.result }} |"
+            echo ""
+            echo "Both are attached to the MicroHub release when they succeed."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "${{ needs.macos.result }}" != "success" ] || [ "${{ needs.windows.result }}" != "success" ]; then
+            echo "one or more platform builds failed"
+            exit 1
+          fi
