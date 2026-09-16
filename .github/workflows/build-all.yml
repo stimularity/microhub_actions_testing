@@ -36,6 +36,39 @@ jobs:
     with:
       publish: ${{ inputs.publish }}
 
+  # There is no fail-fast across separate jobs (that is a matrix feature), so
+  # a failure cancels the whole run, which takes the sibling platform with it.
+  # Only applies here -- running a platform workflow on its own is unaffected.
+  cancel-if-macos-failed:
+    name: Cancel remaining builds (macOS failed)
+    needs: macos
+    if: failure()
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Cancel this run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "macOS build failed - cancelling the Windows build."
+          gh run cancel ${{ github.run_id }} --repo ${{ github.repository }}
+
+  cancel-if-windows-failed:
+    name: Cancel remaining builds (Windows failed)
+    needs: windows
+    if: failure()
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Cancel this run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Windows build failed - cancelling the macOS build."
+          gh run cancel ${{ github.run_id }} --repo ${{ github.repository }}
+
   summary:
     name: Summary
     needs: [macos, windows]
@@ -51,6 +84,9 @@ jobs:
             echo "| --- | --- |"
             echo "| macOS (.dmg) | ${{ needs.macos.result }} |"
             echo "| Windows (.exe) | ${{ needs.windows.result }} |"
+            echo ""
+            echo "A failure on either platform cancels the run, so the other"
+            echo "may show as cancelled rather than failed."
             echo ""
             echo "Both are attached to the MicroHub release when they succeed."
           } >> "$GITHUB_STEP_SUMMARY"

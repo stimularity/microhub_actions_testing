@@ -49,6 +49,26 @@ function Invoke-R($rHome, $code, $description) {
   }
 }
 
+# Retry an R step that depends on a remote repository.
+#
+# The INLA and inlabru hosts are small academic servers that intermittently
+# fail to serve their PACKAGES index; losing a 40-minute build to one blip is
+# not worth it. Verification is deliberately NOT retried -- a failure there is
+# real, not transient.
+function Invoke-RWithRetry($rHome, $code, $description, [int]$Attempts = 3, [int]$DelaySeconds = 30) {
+  for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+    try {
+      Invoke-R $rHome $code $description
+      return
+    } catch {
+      if ($attempt -eq $Attempts) { throw }
+      Write-Host "::warning::$description failed (attempt $attempt of $Attempts): $($_.Exception.Message)"
+      Write-Host "retrying in $DelaySeconds seconds..."
+      Start-Sleep -Seconds $DelaySeconds
+    }
+  }
+}
+
 # 64-bit R keeps binaries in bin\x64; some layouts only have bin.
 function Get-RscriptPath($rHome) {
   foreach ($candidate in @("$rHome\bin\x64\Rscript.exe", "$rHome\bin\Rscript.exe")) {
@@ -75,7 +95,7 @@ function Install-RPackages($rHome) {
 options(repos = c(CRAN = 'https://cloud.r-project.org'), timeout = 1200)
 install.packages('pak')
 '@
-  Invoke-R $rHome $code 'pak install'
+  Invoke-RWithRetry $rHome $code 'pak install'
 
   $code = @'
 options(repos = c(CRAN = 'https://cloud.r-project.org'), timeout = 1200)
@@ -89,7 +109,7 @@ pak::pkg_install(c(
   'reichlab/simplets'
 ), ask = FALSE, upgrade = FALSE)
 '@
-  Invoke-R $rHome $code 'package install'
+  Invoke-RWithRetry $rHome $code 'package install'
 
   $code = @'
 # type = 'binary' is required, not a preference: when the repo's source
@@ -102,7 +122,7 @@ install.packages('fmesher',
   type = 'binary',
   dependencies = c('Depends', 'Imports', 'LinkingTo'))
 '@
-  Invoke-R $rHome $code 'fmesher install'
+  Invoke-RWithRetry $rHome $code 'fmesher install'
 
   $code = @'
 options(timeout = 1800, install.packages.check.source = 'no')
@@ -114,7 +134,7 @@ library(INLA)
 cat('INLA ', as.character(packageVersion('INLA')), '\n', sep = '')
 stopifnot(packageVersion('fmesher') >= '0.5.0')
 '@
-  Invoke-R $rHome $code 'INLA install'
+  Invoke-RWithRetry $rHome $code 'INLA install'
 }
 
 # ---------------------------------------------------------------------------
