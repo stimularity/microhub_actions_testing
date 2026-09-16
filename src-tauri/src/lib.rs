@@ -125,37 +125,52 @@ fn run_extract(
   source_exe: &Path,
   dest: &Path,
 ) -> Result<std::process::ExitStatus, String> {
-  // Built by joining on '&' rather than as one long literal, which rustfmt
-  // collapses into an unreadable line.
-  let banner = [
-    "title MicroHub first-time setup",
-    "echo ==============================================",
-    "echo  MicroHub is installing its R runtime.",
-    "echo.",
-    "echo  This happens once, and takes a few minutes.",
-    "echo  The app opens by itself when this finishes.",
-    "echo  You can leave this window alone.",
-    "echo ==============================================",
-    "echo.",
-  ]
-  .join("&");
-
-  let script = format!(
-    "{banner}&\"{tar}\" -xvzf - -C \"{dst}\"&echo.&echo  Done. Starting MicroHub...",
-    banner = banner,
+  // The commands go in a .bat rather than on cmd's command line. Rust escapes
+  // arguments with MSVC rules, which cmd.exe does not follow, so the quotes
+  // around the tar and destination paths arrive mangled and tar dies -- which
+  // surfaces confusingly as a broken pipe on our side. A file also lets
+  // `exit /b` return tar's exit code: a chained `cmd /c a&b&echo` returns the
+  // status of the LAST command, hiding any failure.
+  let script = std::env::temp_dir().join(format!("microhub-setup-{}.bat", std::process::id()));
+  let body = format!(
+    "@echo off\r\n\
+     title MicroHub first-time setup\r\n\
+     echo ==============================================\r\n\
+     echo  MicroHub is installing its R runtime.\r\n\
+     echo.\r\n\
+     echo  This happens once, and takes a few minutes.\r\n\
+     echo  The app opens by itself when this finishes.\r\n\
+     echo  You can leave this window alone.\r\n\
+     echo ==============================================\r\n\
+     echo.\r\n\
+     \"{tar}\" -xvzf - -C \"{dst}\"\r\n\
+     set TAR_STATUS=%ERRORLEVEL%\r\n\
+     echo.\r\n\
+     if %TAR_STATUS% NEQ 0 (echo  Extraction failed with code %TAR_STATUS%.) else (echo  Done. Starting MicroHub...)\r\n\
+     exit /b %TAR_STATUS%\r\n",
     tar = tar_bin,
     dst = dest.display()
   );
 
+  std::fs::write(&script, body)
+    .map_err(|e| format!("Could not write {}: {e}", script.display()))?;
+
   // tar reads the archive from stdin, fed straight from the payload appended
   // to the .exe. Staging it to a temp file first would write and re-read
   // ~800 MB for nothing. cmd passes its own stdin through to tar.
-  let mut child = Command::new("cmd")
+  let spawned = Command::new("cmd")
     .arg("/c")
-    .arg(script)
+    .arg(&script)
     .stdin(Stdio::piped())
-    .spawn()
-    .map_err(|e| format!("Could not run tar: {e}"))?;
+    .spawn();
+
+  let mut child = match spawned {
+    Ok(child) => child,
+    Err(e) => {
+      let _ = std::fs::remove_file(&script);
+      return Err(format!("Could not run tar: {e}"));
+    }
+  };
 
   let mut reader = payload_reader(source_exe)?;
   let mut stdin = child
@@ -168,6 +183,7 @@ fn run_extract(
   drop(stdin);
 
   let status = child.wait().map_err(|e| format!("Could not wait for tar: {e}"))?;
+  let _ = std::fs::remove_file(&script);
 
   // A write error here is usually a broken pipe caused by tar having already
   // failed, so prefer tar's own status when it is non-zero.
