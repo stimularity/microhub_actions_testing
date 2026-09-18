@@ -1,5 +1,12 @@
 name: Build Tauri R-Shiny Desktop App
 
+# One job, end to end: build the offline R + Python runtime, then bundle it
+# with the Shiny app into a DMG and publish it.
+#
+# The runtime used to live in a separate workflow so it could be iterated on
+# without waiting for the Rust build. That was debugging scaffolding; keeping
+# it separate now only costs a 290 MB artifact round trip between runners.
+
 on:
   workflow_dispatch:
   # Additive: lets build-all.yml invoke this. Manual runs are unaffected, and
@@ -7,25 +14,26 @@ on:
   workflow_call:
 
 jobs:
-  # Stage 2: the offline R + Python runtime. Slow (~1h) and independent of the
-  # Rust build, so it lives in its own reusable workflow.
-  runtime:
-    uses: ./.github/workflows/build-runtime.yml
-
   build:
-    needs: runtime
-    name: Build for ${{ matrix.platform }}
-    runs-on: ${{ matrix.platform }}
+    name: Build for Apple Silicon
+    runs-on: macos-latest # arm64
     permissions:
       contents: write
-    strategy:
-      fail-fast: false
-      matrix:
-        platform: [macos-latest]
+    timeout-minutes: 180
+
+    env:
+      PREFIX: /Users/Shared/MicroHub
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+
+      # Installs R into /Library/Frameworks/R.framework, which is what the INLA
+      # binaries expect. The relocation script moves it afterwards.
+      - name: Setup R
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: "4.5.1"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -36,13 +44,72 @@ jobs:
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      # No Rust cache here on purpose: restoring target/ brought back an
-      # ad-hoc signed `app` binary that cargo could not overwrite (EPERM).
-      # A cold compile costs ~12 min, which is minor next to the runtime job.
+      - name: Report toolchain
+        run: |
+          R --version | head -1
+          echo "arch: $(uname -m)"
+          xcodebuild -version 2>/dev/null | head -1 || true
 
-      # A previously cached target/release/app comes back ad-hoc signed and
-      # with ACLs that make it undeletable, so cargo fails with EPERM when it
-      # tries to overwrite it. Clear the flags and the stale outputs.
+      # --- runtime -----------------------------------------------------------
+
+      - name: Build runtime
+        # HIDE_SYSTEM_R makes verification move the runner's R.framework aside,
+        # so a pass proves the bundle does not depend on it. Safe here; it is
+        # off by default for local runs on a developer Mac.
+        env:
+          HIDE_SYSTEM_R: "1"
+          # Always strict: a runtime that does not verify must not ship.
+          # tools/build-macos-runtime.sh still honours STRICT_VERIFY=0 for
+          # local debugging.
+          STRICT_VERIFY: "1"
+        run: |
+          chmod +x tools/build-macos-runtime.sh
+          tools/build-macos-runtime.sh "$PREFIX"
+
+      # gzip, not zstd: macOS ships tar without the zstd filter, so the app
+      # cannot unpack a .tar.zst ("Can't initialize filter"). Written straight
+      # into the resources directory the bundler reads from.
+      - name: Package runtime
+        run: |
+          mkdir -p src-tauri/resources
+          cd "$(dirname "$PREFIX")"
+          tar -czf "$GITHUB_WORKSPACE/src-tauri/resources/runtime.tar.gz" "$(basename "$PREFIX")"
+          ls -lh "$GITHUB_WORKSPACE/src-tauri/resources/runtime.tar.gz"
+
+      - name: Confirm the archive unpacks with stock macOS tar
+        run: |
+          listing=$(/usr/bin/tar -tzf src-tauri/resources/runtime.tar.gz)
+          echo "$listing" | head -3
+          echo "entries: $(echo "$listing" | wc -l)"
+
+          # A truncated or partially built archive is the failure mode a small
+          # file size would hide, so assert the pieces are actually in there.
+          for required in \
+            '/Resources/bin/R$' \
+            '/site-library/shiny/DESCRIPTION$' \
+            '/site-library/INLA/DESCRIPTION$' \
+            '/site-library/epiprocess/DESCRIPTION$' \
+            'MicroHub/python/bin/python3$'; do
+            echo "$listing" | grep -qE "$required" || {
+              echo "ERROR: nothing matching $required in the archive" >&2
+              exit 1
+            }
+            echo "present: $required"
+          done
+
+      - name: Report size against the 2 GiB release-asset limit
+        run: |
+          bytes=$(stat -f%z src-tauri/resources/runtime.tar.gz)
+          echo "compressed runtime: $((bytes / 1024 / 1024)) MiB"
+          if [ "$bytes" -gt 2147483648 ]; then
+            echo "::warning::runtime exceeds the 2 GiB GitHub release asset limit"
+          fi
+
+      # --- app ---------------------------------------------------------------
+
+      # No Rust cache on purpose: restoring target/ brought back an ad-hoc
+      # signed `app` binary that cargo could not overwrite (EPERM). A cold
+      # compile costs ~12 min, minor next to the runtime build.
       - name: Clear stale build outputs
         run: |
           if [ -e src-tauri/target ]; then
@@ -64,15 +131,8 @@ jobs:
           cp -R R ui server www data src-tauri/resources/app/
           du -sh src-tauri/resources/app
 
-      - name: Download runtime bundle
-        uses: actions/download-artifact@v4
-        with:
-          name: macos-runtime
-          path: src-tauri/resources
-
       - name: Check staged resources
         run: |
-          mv src-tauri/resources/microhub-runtime-arm64.tar.gz src-tauri/resources/runtime.tar.gz
           ls -lh src-tauri/resources
           test -f src-tauri/resources/runtime.tar.gz
           test -f src-tauri/resources/app/app.R
@@ -87,12 +147,6 @@ jobs:
       - name: Install Frontend Dependencies
         run: npm ci
         shell: bash
-
-      - name: Install Linux System Dependencies
-        if: matrix.platform == 'ubuntu-22.04'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
 
       # Publishes to a GitHub Release so the .dmg downloads directly:
       # upload-artifact would always wrap the bundles in a .zip.
