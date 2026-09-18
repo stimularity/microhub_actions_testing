@@ -147,16 +147,14 @@ jobs:
 
       # Publishes to a GitHub Release so the .dmg downloads directly:
       # upload-artifact would always wrap the bundles in a .zip.
-      - name: Build and Publish Tauri Desktop Applications
+      # No tagName/releaseName here: when tauri-action publishes, it also
+      # attaches its own tarball of the .app. The DMG is uploaded by the step
+      # below instead, so the release carries one asset per platform.
+      - name: Build Tauri Desktop Application
         id: tauri
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tagName: app-v__VERSION__
-          releaseName: MicroHub v__VERSION__
-          releaseDraft: false
-          prerelease: false
 
       - name: Verify the bundle contains the runtime and app
         run: |
@@ -167,3 +165,21 @@ jobs:
           test -d "$app/Contents/Resources/shinyapp/data"
           du -sh "$app"
           ls -lh src-tauri/target/release/bundle/dmg/*.dmg
+
+      - name: Attach the DMG to the MicroHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          tag="app-v$version"
+
+          # GitHub replaces spaces in asset filenames with dots, so the name is
+          # hyphenated rather than spaced.
+          cp src-tauri/target/release/bundle/dmg/*.dmg "Mac-MicroHub.dmg"
+          ls -lh Mac-MicroHub.dmg
+
+          gh release view "$tag" >/dev/null 2>&1 \
+            || gh release create "$tag" --title "MicroHub v$version" --notes "MicroHub desktop builds."
+
+          gh release upload "$tag" "Mac-MicroHub.dmg" --clobber
+          echo "uploaded Mac-MicroHub.dmg to $tag"

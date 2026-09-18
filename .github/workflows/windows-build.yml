@@ -206,5 +206,8 @@ jobs:
             gh release create $tag --title "MicroHub v$version" --notes "MicroHub desktop builds."
           }
 
-          gh release upload $tag MicroHub.exe --clobber
-          Write-Host "uploaded MicroHub.exe to $tag"
+          # GitHub replaces spaces in asset filenames with dots, so the name
+          # is hyphenated rather than spaced.
+          Copy-Item MicroHub.exe 'Windows-MicroHub.exe' -Force
+          gh release upload $tag 'Windows-MicroHub.exe' --clobber
+          Write-Host "uploaded Windows-MicroHub.exe to $tag"
