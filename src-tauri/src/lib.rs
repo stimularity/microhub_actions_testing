@@ -79,6 +79,7 @@ fn appended_payload_len(path: &Path) -> Option<u64> {
 /// that would destroy their own packages. All three markers must be present --
 /// a user library has no bin\Rscript.exe next to it, and nothing else ships a
 /// shinyapp\app.R -- so this only fires on our own mess.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn stray_runtime_dirs(base: &Path) -> Vec<PathBuf> {
   let r_dir = base.join("R");
   let python_dir = base.join("python");
@@ -98,6 +99,7 @@ fn stray_runtime_dirs(base: &Path) -> Vec<PathBuf> {
 
 /// Remove a scattered runtime from an earlier build, so upgrading cleans up
 /// after it rather than leaving several hundred MB behind.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn remove_stray_runtime(base: &Path, window: &WebviewWindow) {
   let stray = stray_runtime_dirs(base);
   if stray.is_empty() {

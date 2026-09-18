@@ -102,6 +102,21 @@ jobs:
             echo "::warning::runtime exceeds the 2 GiB GitHub release asset limit"
           fi
 
+      # Everything needed from the runtime is now inside the tarball. Building
+      # the runtime, the .app and then a DMG on one runner is tight on disk,
+      # and hdiutil needs room for roughly another copy of the bundle.
+      - name: Free disk space before bundling
+        run: |
+          echo "--- before ---"
+          df -h /
+
+          sudo rm -rf "$PREFIX"
+          # The system R was only needed to build the runtime.
+          sudo rm -rf /Library/Frameworks/R.framework /Library/Frameworks/R.framework.hidden
+
+          echo "--- after ---"
+          df -h /
+
       # --- app ---------------------------------------------------------------
 
       # No Rust cache on purpose: restoring target/ brought back an ad-hoc
@@ -147,6 +162,14 @@ jobs:
 
       # Publishes to a GitHub Release so the .dmg downloads directly:
       # upload-artifact would always wrap the bundles in a .zip.
+      # A DMG left mounted by an earlier run makes hdiutil fail with a busy
+      # device, which surfaces only as "failed to run bundle_dmg.sh".
+      - name: Detach any stale MicroHub volume
+        run: |
+          hdiutil detach /Volumes/MicroHub -force 2>/dev/null || true
+          ls /Volumes || true
+          df -h /
+
       # No tagName/releaseName here: when tauri-action publishes, it also
       # attaches its own tarball of the .app. The DMG is uploaded by the step
       # below instead, so the release carries one asset per platform.
