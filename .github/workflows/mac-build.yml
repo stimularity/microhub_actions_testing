@@ -187,7 +187,38 @@ jobs:
           test -f "$app/Contents/Resources/shinyapp/app.R"
           test -d "$app/Contents/Resources/shinyapp/data"
           du -sh "$app"
-          ls -lh src-tauri/target/release/bundle/dmg/*.dmg
+
+      # Tauri's own DMG step (bundle_dmg.sh) drives Finder over AppleScript to
+      # style the disk image window, which fails on a headless runner with no
+      # diagnostics beyond "failed to run bundle_dmg.sh". hdiutil alone is
+      # deterministic, and the styling was never needed: the volume still
+      # contains the app next to an Applications symlink to drag it into.
+      - name: Build the DMG
+        run: |
+          staging=$(mktemp -d)
+          cp -R src-tauri/target/release/bundle/macos/MicroHub.app "$staging/"
+          ln -s /Applications "$staging/Applications"
+
+          rm -f Mac-MicroHub.dmg
+          hdiutil create \
+            -volname MicroHub \
+            -srcfolder "$staging" \
+            -fs HFS+ \
+            -format UDZO \
+            -ov \
+            Mac-MicroHub.dmg
+
+          rm -rf "$staging"
+          ls -lh Mac-MicroHub.dmg
+
+          # Prove it mounts and carries the app before it goes near a release.
+          mountpoint=$(mktemp -d)
+          hdiutil attach Mac-MicroHub.dmg -mountpoint "$mountpoint" -nobrowse -readonly
+          test -d "$mountpoint/MicroHub.app"
+          test -f "$mountpoint/MicroHub.app/Contents/Resources/runtime.tar.gz"
+          test -L "$mountpoint/Applications"
+          echo "dmg verified"
+          hdiutil detach "$mountpoint" -force
 
       - name: Attach the DMG to the MicroHub release
         env:
@@ -196,9 +227,6 @@ jobs:
           version=$(node -p "require('./src-tauri/tauri.conf.json').version")
           tag="app-v$version"
 
-          # GitHub replaces spaces in asset filenames with dots, so the name is
-          # hyphenated rather than spaced.
-          cp src-tauri/target/release/bundle/dmg/*.dmg "Mac-MicroHub.dmg"
           ls -lh Mac-MicroHub.dmg
 
           gh release view "$tag" >/dev/null 2>&1 \

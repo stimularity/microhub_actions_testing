@@ -22,7 +22,9 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": [
+      "app"
+    ],
     "macOS": {
       "signingIdentity": "-"
     },
