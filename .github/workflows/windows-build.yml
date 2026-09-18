@@ -1,9 +1,5 @@
-name: Build Windows Portable App
+name: Build Windows Desktop App + Publish
 
-# Completely separate from the macOS pipeline by design: no shared jobs, no
-# reusable workflow calls, no triggers off the Mac build. Run manually when a
-# Windows build is wanted.
-#
 # Produces ONE portable MicroHub.exe. No installer, no admin rights: the R and
 # Python runtime is compiled into the binary and unpacked to
 # %LOCALAPPDATA%\MicroHub on first launch.

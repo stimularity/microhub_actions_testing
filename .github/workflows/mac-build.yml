@@ -1,11 +1,8 @@
-name: Build Tauri R-Shiny Desktop App
+name: Build Mac Desktop App + Publish
 
-# One job, end to end: build the offline R + Python runtime, then bundle it
+# Build the offline R + Python runtime, then bundle it
 # with the Shiny app into a DMG and publish it.
-#
-# The runtime used to live in a separate workflow so it could be iterated on
-# without waiting for the Rust build. That was debugging scaffolding; keeping
-# it separate now only costs a 290 MB artifact round trip between runners.
+# Only for apple silicon, intel macs are not supported (RIP)
 
 on:
   workflow_dispatch:

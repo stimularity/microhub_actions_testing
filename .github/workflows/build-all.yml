@@ -1,7 +1,6 @@
-name: Build Everything (macOS + Windows)
+name: Build Mac and Windows Desktop Apps
 
-# Convenience wrapper that kicks off both platform builds in one click.
-#
+# Builds bothe mac and windows platforms
 # It does NOT merge them: each platform still runs its own independent
 # workflow, on its own runner, with its own runtime build. Either can still be
 # run on its own from the Actions tab, and a failure on one platform does not
@@ -13,7 +12,7 @@ on:
 jobs:
   macos:
     name: macOS
-    uses: ./.github/workflows/tauri-build.yml
+    uses: ./.github/workflows/mac-build.yml
     permissions:
       contents: write
 
@@ -81,4 +80,6 @@ jobs:
           if [ "${{ needs.macos.result }}" != "success" ] || [ "${{ needs.windows.result }}" != "success" ]; then
             echo "one or more platform builds failed"
             exit 1
+          fi
+           exit 1
           fi
