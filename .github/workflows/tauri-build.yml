@@ -2,26 +2,15 @@ name: Build Tauri R-Shiny Desktop App
 
 on:
   workflow_dispatch:
-    inputs:
-      strict_verify:
-        description: Fail if the R runtime does not verify (turn off to get a DMG anyway)
-        type: boolean
-        default: true
   # Additive: lets build-all.yml invoke this. Manual runs are unaffected, and
   # the two platform pipelines remain entirely independent of each other.
   workflow_call:
-    inputs:
-      strict_verify:
-        type: boolean
-        default: true
 
 jobs:
   # Stage 2: the offline R + Python runtime. Slow (~1h) and independent of the
   # Rust build, so it lives in its own reusable workflow.
   runtime:
     uses: ./.github/workflows/build-runtime.yml
-    with:
-      strict_verify: ${{ inputs.strict_verify }}
 
   build:
     needs: runtime

@@ -9,15 +9,6 @@ name: Build Everything (macOS + Windows)
 
 on:
   workflow_dispatch:
-    inputs:
-      strict_verify:
-        description: macOS - fail if the R runtime does not verify
-        type: boolean
-        default: true
-      publish:
-        description: Windows - attach MicroHub.exe to the release
-        type: boolean
-        default: true
 
 jobs:
   macos:
@@ -25,16 +16,12 @@ jobs:
     uses: ./.github/workflows/tauri-build.yml
     permissions:
       contents: write
-    with:
-      strict_verify: ${{ inputs.strict_verify }}
 
   windows:
     name: Windows
     uses: ./.github/workflows/windows-build.yml
     permissions:
       contents: write
-    with:
-      publish: ${{ inputs.publish }}
 
   # There is no fail-fast across separate jobs (that is a matrix feature), so
   # a failure cancels the whole run, which takes the sibling platform with it.

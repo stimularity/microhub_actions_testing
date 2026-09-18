@@ -6,16 +6,7 @@ name: Build macOS Runtime Bundle
 
 on:
   workflow_dispatch:
-    inputs:
-      strict_verify:
-        description: Fail the build if the runtime does not verify
-        type: boolean
-        default: true
   workflow_call:
-    inputs:
-      strict_verify:
-        type: boolean
-        default: true
     outputs:
       artifact:
         description: Name of the uploaded runtime artifact
@@ -53,7 +44,10 @@ jobs:
         # off by default for local runs on a developer Mac.
         env:
           HIDE_SYSTEM_R: "1"
-          STRICT_VERIFY: ${{ inputs.strict_verify && '1' || '0' }}
+          # Always strict: a runtime that does not verify must not ship.
+          # tools/build-macos-runtime.sh still honours STRICT_VERIFY=0 for
+          # local debugging.
+          STRICT_VERIFY: "1"
         run: |
           chmod +x tools/build-macos-runtime.sh
           tools/build-macos-runtime.sh "$PREFIX"

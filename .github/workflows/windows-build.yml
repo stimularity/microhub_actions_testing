@@ -10,17 +10,8 @@ name: Build Windows Portable App
 
 on:
   workflow_dispatch:
-    inputs:
-      publish:
-        description: Attach MicroHub.exe to the MicroHub release
-        type: boolean
-        default: true
   # Additive: lets build-all.yml invoke this. Manual runs are unaffected.
   workflow_call:
-    inputs:
-      publish:
-        type: boolean
-        default: true
 
 jobs:
   runtime:
@@ -207,7 +198,6 @@ jobs:
       # Attaches to the same release the macOS workflow publishes, so one page
       # carries both downloads. Creates the release only if it does not exist.
       - name: Attach to the MicroHub release
-        if: inputs.publish
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
