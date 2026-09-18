@@ -81,5 +81,3 @@ jobs:
             echo "one or more platform builds failed"
             exit 1
           fi
-           exit 1
-          fi
