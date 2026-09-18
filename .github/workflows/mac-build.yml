@@ -234,3 +234,17 @@ jobs:
 
           gh release upload "$tag" "Mac-MicroHub.dmg" --clobber
           echo "uploaded Mac-MicroHub.dmg to $tag"
+
+          # Drop assets from earlier builds (differently named DMGs, the old
+          # .app tarball). Both platforms are kept, since either workflow can
+          # be run on its own and must not delete the other's download.
+          keep="Mac-MicroHub.dmg Windows-MicroHub.exe"
+          gh release view "$tag" --json assets --jq '.assets[].name' | while read -r name; do
+            case " $keep " in
+              *" $name "*) echo "keeping  $name" ;;
+              *) echo "removing $name"; gh release delete-asset "$tag" "$name" --yes ;;
+            esac
+          done
+
+          echo "--- assets now on $tag ---"
+          gh release view "$tag" --json assets --jq '.assets[].name'

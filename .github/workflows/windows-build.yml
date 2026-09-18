@@ -211,3 +211,20 @@ jobs:
           Copy-Item MicroHub.exe 'Windows-MicroHub.exe' -Force
           gh release upload $tag 'Windows-MicroHub.exe' --clobber
           Write-Host "uploaded Windows-MicroHub.exe to $tag"
+
+          # Drop assets from earlier builds. Both platforms are kept, since
+          # either workflow can run on its own and must not delete the other's
+          # download.
+          $keep = @('Mac-MicroHub.dmg', 'Windows-MicroHub.exe')
+          $assets = gh release view $tag --json assets --jq '.assets[].name'
+          foreach ($name in $assets) {
+            if ($keep -contains $name) {
+              Write-Host "keeping  $name"
+            } else {
+              Write-Host "removing $name"
+              gh release delete-asset $tag $name --yes
+            }
+          }
+
+          Write-Host "--- assets now on $tag ---"
+          gh release view $tag --json assets --jq '.assets[].name'
